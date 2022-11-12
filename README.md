@@ -71,6 +71,11 @@ coder server --postgres-url <url> --access-url <url>
 
 Use `coder --help` to get a complete list of flags and environment variables. Use our [quickstart guide](https://coder.com/docs/coder-oss/latest/quickstart) for a full walkthrough.
 
+To run in docker
+```bash
+sudo chmod 666 /var/run/docker.sock
+```
+
 ## Documentation
 
 Visit our docs [here](https://coder.com/docs/coder-oss).

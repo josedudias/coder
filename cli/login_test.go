@@ -54,8 +54,44 @@ func TestLogin(t *testing.T) {
 			"first user?", "yes",
 			"username", "testuser",
 			"email", "user@coder.com",
-			"password", "password",
-			"password", "password", // Confirm.
+			"password", "SomeSecurePassword!",
+			"password", "SomeSecurePassword!", // Confirm.
+			"trial", "yes",
+		}
+		for i := 0; i < len(matches); i += 2 {
+			match := matches[i]
+			value := matches[i+1]
+			pty.ExpectMatch(match)
+			pty.WriteLine(value)
+		}
+		pty.ExpectMatch("Welcome to Coder")
+		<-doneChan
+	})
+
+	t.Run("InitialUserTTYFlag", func(t *testing.T) {
+		t.Parallel()
+		client := coderdtest.New(t, nil)
+		// The --force-tty flag is required on Windows, because the `isatty` library does not
+		// accurately detect Windows ptys when they are not attached to a process:
+		// https://github.com/mattn/go-isatty/issues/59
+		doneChan := make(chan struct{})
+		root, _ := clitest.New(t, "--url", client.URL.String(), "login", "--force-tty")
+		pty := ptytest.New(t)
+		root.SetIn(pty.Input())
+		root.SetOut(pty.Output())
+		go func() {
+			defer close(doneChan)
+			err := root.Execute()
+			assert.NoError(t, err)
+		}()
+
+		matches := []string{
+			"first user?", "yes",
+			"username", "testuser",
+			"email", "user@coder.com",
+			"password", "SomeSecurePassword!",
+			"password", "SomeSecurePassword!", // Confirm.
+			"trial", "yes",
 		}
 		for i := 0; i < len(matches); i += 2 {
 			match := matches[i]
@@ -70,11 +106,8 @@ func TestLogin(t *testing.T) {
 	t.Run("InitialUserFlags", func(t *testing.T) {
 		t.Parallel()
 		client := coderdtest.New(t, nil)
-		// The --force-tty flag is required on Windows, because the `isatty` library does not
-		// accurately detect Windows ptys when they are not attached to a process:
-		// https://github.com/mattn/go-isatty/issues/59
 		doneChan := make(chan struct{})
-		root, _ := clitest.New(t, "login", client.URL.String(), "--first-user-username", "testuser", "--first-user-email", "user@coder.com", "--first-user-password", "password")
+		root, _ := clitest.New(t, "login", client.URL.String(), "--first-user-username", "testuser", "--first-user-email", "user@coder.com", "--first-user-password", "SomeSecurePassword!", "--first-user-trial")
 		pty := ptytest.New(t)
 		root.SetIn(pty.Input())
 		root.SetOut(pty.Output())
@@ -110,8 +143,8 @@ func TestLogin(t *testing.T) {
 			"first user?", "yes",
 			"username", "testuser",
 			"email", "user@coder.com",
-			"password", "mypass",
-			"password", "wrongpass", // Confirm.
+			"password", "MyFirstSecurePassword!",
+			"password", "MyNonMatchingSecurePassword!", // Confirm.
 		}
 		for i := 0; i < len(matches); i += 2 {
 			match := matches[i]
@@ -124,9 +157,11 @@ func TestLogin(t *testing.T) {
 		pty.ExpectMatch("Passwords do not match")
 		pty.ExpectMatch("Enter a " + cliui.Styles.Field.Render("password"))
 
-		pty.WriteLine("pass")
+		pty.WriteLine("SomeSecurePassword!")
 		pty.ExpectMatch("Confirm")
-		pty.WriteLine("pass")
+		pty.WriteLine("SomeSecurePassword!")
+		pty.ExpectMatch("trial")
+		pty.WriteLine("yes")
 		pty.ExpectMatch("Welcome to Coder")
 		<-doneChan
 	})

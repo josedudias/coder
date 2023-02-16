@@ -1,32 +1,40 @@
 package coderdtest
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/moby/moby/pkg/namesgenerator"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/xerrors"
 
+	"github.com/coder/coder/cryptorand"
+
 	"github.com/coder/coder/coderd"
 	"github.com/coder/coder/coderd/rbac"
+	"github.com/coder/coder/coderd/rbac/regosql"
 	"github.com/coder/coder/codersdk"
 	"github.com/coder/coder/provisioner/echo"
 	"github.com/coder/coder/provisionersdk/proto"
-	"github.com/coder/coder/testutil"
 )
 
 func AGPLRoutes(a *AuthTester) (map[string]string, map[string]RouteCheck) {
 	// Some quick reused objects
-	workspaceRBACObj := rbac.ResourceWorkspace.InOrg(a.Organization.ID).WithOwner(a.Workspace.OwnerID.String())
-	workspaceExecObj := rbac.ResourceWorkspaceExecution.InOrg(a.Organization.ID).WithOwner(a.Workspace.OwnerID.String())
-	applicationConnectObj := rbac.ResourceWorkspaceApplicationConnect.InOrg(a.Organization.ID).WithOwner(a.Workspace.OwnerID.String())
+	workspaceRBACObj := rbac.ResourceWorkspace.WithID(a.Workspace.ID).InOrg(a.Organization.ID).WithOwner(a.Workspace.OwnerID.String())
+	workspaceExecObj := rbac.ResourceWorkspaceExecution.WithID(a.Workspace.ID).InOrg(a.Organization.ID).WithOwner(a.Workspace.OwnerID.String())
+	applicationConnectObj := rbac.ResourceWorkspaceApplicationConnect.WithID(a.Workspace.ID).InOrg(a.Organization.ID).WithOwner(a.Workspace.OwnerID.String())
+	templateObj := rbac.ResourceTemplate.WithID(a.Template.ID).InOrg(a.Template.OrganizationID)
 
 	// skipRoutes allows skipping routes from being checked.
 	skipRoutes := map[string]string{
@@ -40,6 +48,8 @@ func AGPLRoutes(a *AuthTester) (map[string]string, map[string]RouteCheck) {
 		"GET:/healthz":                  {NoAuthorize: true},
 		"GET:/api/v2":                   {NoAuthorize: true},
 		"GET:/api/v2/buildinfo":         {NoAuthorize: true},
+		"GET:/api/v2/experiments":       {NoAuthorize: true}, // This route requires AuthN, but not AuthZ.
+		"GET:/api/v2/updatecheck":       {NoAuthorize: true},
 		"GET:/api/v2/users/first":       {NoAuthorize: true},
 		"POST:/api/v2/users/first":      {NoAuthorize: true},
 		"POST:/api/v2/users/login":      {NoAuthorize: true},
@@ -47,8 +57,6 @@ func AGPLRoutes(a *AuthTester) (map[string]string, map[string]RouteCheck) {
 		"POST:/api/v2/csp/reports":      {NoAuthorize: true},
 		"POST:/api/v2/authcheck":        {NoAuthorize: true},
 		"GET:/api/v2/applications/host": {NoAuthorize: true},
-		// This is a dummy endpoint for compatibility with older CLI versions.
-		"GET:/api/v2/workspaceagents/{workspaceagent}/dial": {NoAuthorize: true},
 
 		// Has it's own auth
 		"GET:/api/v2/users/oauth2/github/callback": {NoAuthorize: true},
@@ -62,12 +70,13 @@ func AGPLRoutes(a *AuthTester) (map[string]string, map[string]RouteCheck) {
 		"GET:/api/v2/workspaceagents/me/gitsshkey":              {NoAuthorize: true},
 		"GET:/api/v2/workspaceagents/me/metadata":               {NoAuthorize: true},
 		"GET:/api/v2/workspaceagents/me/coordinate":             {NoAuthorize: true},
-		"POST:/api/v2/workspaceagents/me/version":               {NoAuthorize: true},
+		"POST:/api/v2/workspaceagents/me/startup":               {NoAuthorize: true},
 		"POST:/api/v2/workspaceagents/me/app-health":            {NoAuthorize: true},
-		"GET:/api/v2/workspaceagents/me/report-stats":           {NoAuthorize: true},
+		"POST:/api/v2/workspaceagents/me/report-stats":          {NoAuthorize: true},
+		"POST:/api/v2/workspaceagents/me/report-lifecycle":      {NoAuthorize: true},
 
 		// These endpoints have more assertions. This is good, add more endpoints to assert if you can!
-		"GET:/api/v2/organizations/{organization}": {AssertObject: rbac.ResourceOrganization.InOrg(a.Admin.OrganizationID)},
+		"GET:/api/v2/organizations/{organization}": {AssertObject: rbac.ResourceOrganization.WithID(a.Admin.OrganizationID).InOrg(a.Admin.OrganizationID)},
 		"GET:/api/v2/users/{user}/organizations":   {StatusCode: http.StatusOK, AssertObject: rbac.ResourceOrganization},
 		"GET:/api/v2/users/{user}/workspace/{workspacename}": {
 			AssertObject: rbac.ResourceWorkspace,
@@ -75,6 +84,15 @@ func AGPLRoutes(a *AuthTester) (map[string]string, map[string]RouteCheck) {
 		},
 		"GET:/api/v2/users/{user}/workspace/{workspacename}/builds/{buildnumber}": {
 			AssertObject: rbac.ResourceWorkspace,
+			AssertAction: rbac.ActionRead,
+		},
+		"GET:/api/v2/users/{user}/keys/tokens": {
+			AssertObject: rbac.ResourceAPIKey,
+			AssertAction: rbac.ActionRead,
+			StatusCode:   http.StatusOK,
+		},
+		"GET:/api/v2/users/{user}/keys/{keyid}": {
+			AssertObject: rbac.ResourceAPIKey,
 			AssertAction: rbac.ActionRead,
 		},
 		"GET:/api/v2/workspacebuilds/{workspacebuild}": {
@@ -125,22 +143,17 @@ func AGPLRoutes(a *AuthTester) (map[string]string, map[string]RouteCheck) {
 			AssertAction: rbac.ActionCreate,
 			AssertObject: workspaceExecObj,
 		},
-		"GET:/api/v2/organizations/{organization}/templates": {
-			StatusCode:   http.StatusOK,
-			AssertAction: rbac.ActionRead,
-			AssertObject: rbac.ResourceTemplate.InOrg(a.Template.OrganizationID),
-		},
 		"POST:/api/v2/organizations/{organization}/templates": {
 			AssertAction: rbac.ActionCreate,
 			AssertObject: rbac.ResourceTemplate.InOrg(a.Organization.ID),
 		},
 		"DELETE:/api/v2/templates/{template}": {
 			AssertAction: rbac.ActionDelete,
-			AssertObject: rbac.ResourceTemplate.InOrg(a.Template.OrganizationID),
+			AssertObject: templateObj,
 		},
 		"GET:/api/v2/templates/{template}": {
 			AssertAction: rbac.ActionRead,
-			AssertObject: rbac.ResourceTemplate.InOrg(a.Template.OrganizationID),
+			AssertObject: templateObj,
 		},
 		"POST:/api/v2/files": {AssertAction: rbac.ActionCreate, AssertObject: rbac.ResourceFile},
 		"GET:/api/v2/files/{fileID}": {
@@ -149,66 +162,65 @@ func AGPLRoutes(a *AuthTester) (map[string]string, map[string]RouteCheck) {
 		},
 		"GET:/api/v2/templates/{template}/versions": {
 			AssertAction: rbac.ActionRead,
-			AssertObject: rbac.ResourceTemplate.InOrg(a.Template.OrganizationID),
+			AssertObject: templateObj,
 		},
 		"PATCH:/api/v2/templates/{template}/versions": {
 			AssertAction: rbac.ActionUpdate,
-			AssertObject: rbac.ResourceTemplate.InOrg(a.Template.OrganizationID),
+			AssertObject: templateObj,
 		},
 		"GET:/api/v2/templates/{template}/versions/{templateversionname}": {
 			AssertAction: rbac.ActionRead,
-			AssertObject: rbac.ResourceTemplate.InOrg(a.Template.OrganizationID),
+			AssertObject: templateObj,
 		},
 		"GET:/api/v2/templateversions/{templateversion}": {
 			AssertAction: rbac.ActionRead,
-			AssertObject: rbac.ResourceTemplate.InOrg(a.Template.OrganizationID),
+			AssertObject: templateObj,
 		},
 		"PATCH:/api/v2/templateversions/{templateversion}/cancel": {
 			AssertAction: rbac.ActionUpdate,
-			AssertObject: rbac.ResourceTemplate.InOrg(a.Template.OrganizationID),
+			AssertObject: templateObj,
 		},
 		"GET:/api/v2/templateversions/{templateversion}/logs": {
 			AssertAction: rbac.ActionRead,
-			AssertObject: rbac.ResourceTemplate.InOrg(a.Template.OrganizationID),
+			AssertObject: templateObj,
 		},
 		"GET:/api/v2/templateversions/{templateversion}/parameters": {
 			AssertAction: rbac.ActionRead,
-			AssertObject: rbac.ResourceTemplate.InOrg(a.Template.OrganizationID),
+			AssertObject: templateObj,
+		},
+		"GET:/api/v2/templateversions/{templateversion}/rich-parameters": {
+			AssertAction: rbac.ActionRead,
+			AssertObject: templateObj,
 		},
 		"GET:/api/v2/templateversions/{templateversion}/resources": {
 			AssertAction: rbac.ActionRead,
-			AssertObject: rbac.ResourceTemplate.InOrg(a.Template.OrganizationID),
+			AssertObject: templateObj,
 		},
 		"GET:/api/v2/templateversions/{templateversion}/schema": {
 			AssertAction: rbac.ActionRead,
-			AssertObject: rbac.ResourceTemplate.InOrg(a.Template.OrganizationID),
+			AssertObject: templateObj,
 		},
 		"POST:/api/v2/templateversions/{templateversion}/dry-run": {
 			// The first check is to read the template
 			AssertAction: rbac.ActionRead,
-			AssertObject: rbac.ResourceTemplate.InOrg(a.Version.OrganizationID),
+			AssertObject: templateObj,
 		},
 		"GET:/api/v2/templateversions/{templateversion}/dry-run/{jobID}": {
 			AssertAction: rbac.ActionRead,
-			AssertObject: rbac.ResourceTemplate.InOrg(a.Version.OrganizationID),
+			AssertObject: templateObj,
 		},
 		"GET:/api/v2/templateversions/{templateversion}/dry-run/{jobID}/resources": {
 			AssertAction: rbac.ActionRead,
-			AssertObject: rbac.ResourceTemplate.InOrg(a.Version.OrganizationID),
+			AssertObject: templateObj,
 		},
 		"GET:/api/v2/templateversions/{templateversion}/dry-run/{jobID}/logs": {
 			AssertAction: rbac.ActionRead,
-			AssertObject: rbac.ResourceTemplate.InOrg(a.Version.OrganizationID),
+			AssertObject: templateObj,
 		},
 		"PATCH:/api/v2/templateversions/{templateversion}/dry-run/{jobID}/cancel": {
 			AssertAction: rbac.ActionRead,
-			AssertObject: rbac.ResourceTemplate.InOrg(a.Version.OrganizationID),
+			AssertObject: templateObj,
 		},
-		"GET:/api/v2/provisionerdaemons": {
-			StatusCode:   http.StatusOK,
-			AssertObject: rbac.ResourceProvisionerDaemon,
-		},
-
 		"POST:/api/v2/parameters/{scope}/{id}": {
 			AssertAction: rbac.ActionUpdate,
 			AssertObject: rbac.ResourceTemplate,
@@ -223,7 +235,15 @@ func AGPLRoutes(a *AuthTester) (map[string]string, map[string]RouteCheck) {
 		},
 		"GET:/api/v2/organizations/{organization}/templates/{templatename}": {
 			AssertAction: rbac.ActionRead,
-			AssertObject: rbac.ResourceTemplate.InOrg(a.Template.OrganizationID),
+			AssertObject: templateObj,
+		},
+		"GET:/api/v2/organizations/{organization}/templates/{templatename}/versions/{templateversionname}": {
+			AssertAction: rbac.ActionRead,
+			AssertObject: templateObj,
+		},
+		"GET:/api/v2/organizations/{organization}/templates/{templatename}/versions/{templateversionname}/previous": {
+			AssertAction: rbac.ActionRead,
+			AssertObject: templateObj,
 		},
 		"POST:/api/v2/organizations/{organization}/members/{user}/workspaces": {
 			AssertAction: rbac.ActionCreate,
@@ -243,17 +263,35 @@ func AGPLRoutes(a *AuthTester) (map[string]string, map[string]RouteCheck) {
 		"POST:/api/v2/workspaces/{workspace}/builds":                    {StatusCode: http.StatusBadRequest, NoAuthorize: true},
 		"POST:/api/v2/organizations/{organization}/templateversions":    {StatusCode: http.StatusBadRequest, NoAuthorize: true},
 
-		// Endpoints that use the SQLQuery filter.
-		"GET:/api/v2/workspaces/": {StatusCode: http.StatusOK, NoAuthorize: true},
-		"GET:/api/v2/users/count": {StatusCode: http.StatusOK, NoAuthorize: true},
+		// For any route using SQL filters, we do not check authorization.
+		// This is because the in memory fake does not use SQL.
+		"GET:/api/v2/workspaces/": {
+			StatusCode:   http.StatusOK,
+			NoAuthorize:  true,
+			AssertAction: rbac.ActionRead,
+			AssertObject: rbac.ResourceWorkspace,
+		},
+		"GET:/api/v2/organizations/{organization}/templates": {
+			StatusCode:   http.StatusOK,
+			NoAuthorize:  true,
+			AssertAction: rbac.ActionRead,
+			AssertObject: rbac.ResourceTemplate,
+		},
+
+		"GET:/api/v2/debug/coordinator": {
+			AssertAction: rbac.ActionRead,
+			AssertObject: rbac.ResourceDebugInfo,
+		},
 	}
 
 	// Routes like proxy routes support all HTTP methods. A helper func to expand
 	// 1 url to all http methods.
 	assertAllHTTPMethods := func(url string, check RouteCheck) {
-		methods := []string{http.MethodGet, http.MethodHead, http.MethodPost,
+		methods := []string{
+			http.MethodGet, http.MethodHead, http.MethodPost,
 			http.MethodPut, http.MethodPatch, http.MethodDelete,
-			http.MethodConnect, http.MethodOptions, http.MethodTrace}
+			http.MethodConnect, http.MethodOptions, http.MethodTrace,
+		}
 
 		for _, method := range methods {
 			route := method + ":" + url
@@ -303,16 +341,15 @@ func NewAuthTester(ctx context.Context, t *testing.T, client *codersdk.Client, a
 	if !ok {
 		t.Fail()
 	}
-	// The provisioner will call to coderd and register itself. This is async,
-	// so we wait for it to occur.
-	require.Eventually(t, func() bool {
-		provisionerds, err := client.ProvisionerDaemons(ctx)
-		return assert.NoError(t, err) && len(provisionerds) > 0
-	}, testutil.WaitLong, testutil.IntervalSlow)
+	_, err := client.CreateToken(ctx, admin.UserID.String(), codersdk.CreateTokenRequest{
+		Lifetime: time.Hour,
+		Scope:    codersdk.APIKeyScopeAll,
+	})
+	require.NoError(t, err, "create token")
 
-	provisionerds, err := client.ProvisionerDaemons(ctx)
-	require.NoError(t, err, "fetch provisioners")
-	require.Len(t, provisionerds, 1)
+	apiKeys, err := client.Tokens(ctx, admin.UserID.String())
+	require.NoError(t, err, "get tokens")
+	apiKey := apiKeys[0]
 
 	organization, err := client.Organization(ctx, admin.OrganizationID)
 	require.NoError(t, err, "fetch org")
@@ -346,7 +383,7 @@ func NewAuthTester(ctx context.Context, t *testing.T, client *codersdk.Client, a
 	template := CreateTemplate(t, client, admin.OrganizationID, version.ID)
 	workspace := CreateWorkspace(t, client, admin.OrganizationID, template.ID)
 	AwaitWorkspaceBuildJob(t, client, workspace.LatestBuild.ID)
-	file, err := client.Upload(ctx, codersdk.ContentTypeTar, make([]byte, 1024))
+	file, err := client.Upload(ctx, codersdk.ContentTypeTar, bytes.NewReader(make([]byte, 1024)))
 	require.NoError(t, err, "upload file")
 	workspace, err = client.Workspace(ctx, workspace.ID)
 	require.NoError(t, err, "workspace resources")
@@ -379,6 +416,7 @@ func NewAuthTester(ctx context.Context, t *testing.T, client *codersdk.Client, a
 		"{jobID}":               templateVersionDryRun.ID.String(),
 		"{templatename}":        template.Name,
 		"{workspace_and_agent}": workspace.Name + "." + workspace.LatestBuild.Resources[0].Agents[0].Name,
+		"{keyid}":               apiKey.ID,
 		// Only checking template scoped params here
 		"parameters/{scope}/{id}": fmt.Sprintf("parameters/%s/%s",
 			string(templateParam.Scope), templateParam.ScopeID.String()),
@@ -404,7 +442,9 @@ func NewAuthTester(ctx context.Context, t *testing.T, client *codersdk.Client, a
 
 func (a *AuthTester) Test(ctx context.Context, assertRoute map[string]RouteCheck, skipRoutes map[string]string) {
 	// Always fail auth from this point forward
-	a.authorizer.AlwaysReturn = rbac.ForbiddenWithInternal(xerrors.New("fake implementation"), nil, nil)
+	a.authorizer.Wrapped = &FakeAuthorizer{
+		AlwaysReturn: rbac.ForbiddenWithInternal(xerrors.New("fake implementation"), rbac.Subject{}, "", rbac.Object{}, nil),
+	}
 
 	routeMissing := make(map[string]bool)
 	for k, v := range assertRoute {
@@ -444,7 +484,7 @@ func (a *AuthTester) Test(ctx context.Context, assertRoute map[string]RouteCheck
 				return nil
 			}
 			a.t.Run(name, func(t *testing.T) {
-				a.authorizer.reset()
+				a.authorizer.Reset()
 				routeKey := strings.TrimRight(name, "/")
 
 				routeAssertions, ok := assertRoute[routeKey]
@@ -475,18 +515,19 @@ func (a *AuthTester) Test(ctx context.Context, assertRoute map[string]RouteCheck
 							assert.Equal(t, http.StatusForbidden, resp.StatusCode, "expect unauthorized")
 						}
 					}
-					if a.authorizer.Called != nil {
+					if a.authorizer.lastCall() != nil {
+						last := a.authorizer.lastCall()
 						if routeAssertions.AssertAction != "" {
-							assert.Equal(t, routeAssertions.AssertAction, a.authorizer.Called.Action, "resource action")
+							assert.Equal(t, routeAssertions.AssertAction, last.Action, "resource action")
 						}
 						if routeAssertions.AssertObject.Type != "" {
-							assert.Equal(t, routeAssertions.AssertObject.Type, a.authorizer.Called.Object.Type, "resource type")
+							assert.Equal(t, routeAssertions.AssertObject.Type, last.Object.Type, "resource type")
 						}
 						if routeAssertions.AssertObject.Owner != "" {
-							assert.Equal(t, routeAssertions.AssertObject.Owner, a.authorizer.Called.Object.Owner, "resource owner")
+							assert.Equal(t, routeAssertions.AssertObject.Owner, last.Object.Owner, "resource owner")
 						}
 						if routeAssertions.AssertObject.OrgID != "" {
-							assert.Equal(t, routeAssertions.AssertObject.OrgID, a.authorizer.Called.Object.OrgID, "resource org")
+							assert.Equal(t, routeAssertions.AssertObject.OrgID, last.Object.OrgID, "resource org")
 						}
 					}
 				} else {
@@ -500,90 +541,267 @@ func (a *AuthTester) Test(ctx context.Context, assertRoute map[string]RouteCheck
 }
 
 type authCall struct {
-	SubjectID string
-	Roles     []string
-	Groups    []string
-	Scope     rbac.Scope
-	Action    rbac.Action
-	Object    rbac.Object
-}
+	rbac.AuthCall
 
-type RecordingAuthorizer struct {
-	Called       *authCall
-	AlwaysReturn error
+	asserted bool
 }
 
 var _ rbac.Authorizer = (*RecordingAuthorizer)(nil)
 
-// ByRoleNameSQL does not record the call. This matches the postgres behavior
-// of not calling Authorize()
-func (r *RecordingAuthorizer) ByRoleNameSQL(_ context.Context, _ string, _ []string, _ rbac.Scope, _ []string, _ rbac.Action, _ rbac.Object) error {
-	return r.AlwaysReturn
+// RecordingAuthorizer wraps any rbac.Authorizer and records all Authorize()
+// calls made. This is useful for testing as these calls can later be asserted.
+type RecordingAuthorizer struct {
+	sync.RWMutex
+	Called  []authCall
+	Wrapped rbac.Authorizer
 }
 
-func (r *RecordingAuthorizer) ByRoleName(_ context.Context, subjectID string, roleNames []string, scope rbac.Scope, groups []string, action rbac.Action, object rbac.Object) error {
-	r.Called = &authCall{
-		SubjectID: subjectID,
-		Roles:     roleNames,
-		Groups:    groups,
-		Scope:     scope,
-		Action:    action,
-		Object:    object,
+type ActionObjectPair struct {
+	Action rbac.Action
+	Object rbac.Object
+}
+
+// Pair is on the RecordingAuthorizer to be easy to find and keep the pkg
+// interface smaller.
+func (*RecordingAuthorizer) Pair(action rbac.Action, object rbac.Objecter) ActionObjectPair {
+	return ActionObjectPair{
+		Action: action,
+		Object: object.RBACObject(),
 	}
-	return r.AlwaysReturn
 }
 
-func (r *RecordingAuthorizer) PrepareByRoleName(_ context.Context, subjectID string, roles []string, scope rbac.Scope, groups []string, action rbac.Action, _ string) (rbac.PreparedAuthorized, error) {
-	return &fakePreparedAuthorizer{
-		Original:           r,
-		SubjectID:          subjectID,
-		Roles:              roles,
-		Scope:              scope,
-		Action:             action,
-		HardCodedSQLString: "true",
-		Groups:             groups,
+// AllAsserted returns an error if all calls to Authorize() have not been
+// asserted and checked. This is useful for testing to ensure that all
+// Authorize() calls are checked in the unit test.
+func (r *RecordingAuthorizer) AllAsserted() error {
+	r.RLock()
+	defer r.RUnlock()
+	missed := []authCall{}
+	for _, c := range r.Called {
+		if !c.asserted {
+			missed = append(missed, c)
+		}
+	}
+
+	if len(missed) > 0 {
+		return xerrors.Errorf("missed calls: %+v", missed)
+	}
+	return nil
+}
+
+// AssertActor asserts in order. If the order of authz calls does not match,
+// this will fail.
+func (r *RecordingAuthorizer) AssertActor(t *testing.T, actor rbac.Subject, did ...ActionObjectPair) {
+	r.RLock()
+	defer r.RUnlock()
+	ptr := 0
+	for i, call := range r.Called {
+		if ptr == len(did) {
+			// Finished all assertions
+			return
+		}
+		if call.Actor.ID == actor.ID {
+			action, object := did[ptr].Action, did[ptr].Object
+			assert.Equalf(t, action, call.Action, "assert action %d", ptr)
+			assert.Equalf(t, object, call.Object, "assert object %d", ptr)
+			r.Called[i].asserted = true
+			ptr++
+		}
+	}
+
+	assert.Equalf(t, len(did), ptr, "assert actor: didn't find all actions, %d missing actions", len(did)-ptr)
+}
+
+// recordAuthorize is the internal method that records the Authorize() call.
+func (r *RecordingAuthorizer) recordAuthorize(subject rbac.Subject, action rbac.Action, object rbac.Object) {
+	r.Lock()
+	defer r.Unlock()
+	r.Called = append(r.Called, authCall{
+		AuthCall: rbac.AuthCall{
+			Actor:  subject,
+			Action: action,
+			Object: object,
+		},
+	})
+}
+
+func (r *RecordingAuthorizer) Authorize(ctx context.Context, subject rbac.Subject, action rbac.Action, object rbac.Object) error {
+	r.recordAuthorize(subject, action, object)
+	if r.Wrapped == nil {
+		panic("Developer error: RecordingAuthorizer.Wrapped is nil")
+	}
+	return r.Wrapped.Authorize(ctx, subject, action, object)
+}
+
+func (r *RecordingAuthorizer) Prepare(ctx context.Context, subject rbac.Subject, action rbac.Action, objectType string) (rbac.PreparedAuthorized, error) {
+	r.RLock()
+	defer r.RUnlock()
+	if r.Wrapped == nil {
+		panic("Developer error: RecordingAuthorizer.Wrapped is nil")
+	}
+
+	prep, err := r.Wrapped.Prepare(ctx, subject, action, objectType)
+	if err != nil {
+		return nil, err
+	}
+	return &PreparedRecorder{
+		rec:     r,
+		prepped: prep,
+		subject: subject,
+		action:  action,
 	}, nil
 }
 
-func (r *RecordingAuthorizer) reset() {
+// Reset clears the recorded Authorize() calls.
+func (r *RecordingAuthorizer) Reset() {
+	r.Lock()
+	defer r.Unlock()
 	r.Called = nil
 }
 
+// lastCall is implemented to support legacy tests.
+// Deprecated
+func (r *RecordingAuthorizer) lastCall() *authCall {
+	r.RLock()
+	defer r.RUnlock()
+	if len(r.Called) == 0 {
+		return nil
+	}
+	return &r.Called[len(r.Called)-1]
+}
+
+// PreparedRecorder is the prepared version of the RecordingAuthorizer.
+// It records the Authorize() calls to the original recorder. If the caller
+// uses CompileToSQL, all recording stops. This is to support parity between
+// memory and SQL backed dbs.
+type PreparedRecorder struct {
+	rec     *RecordingAuthorizer
+	prepped rbac.PreparedAuthorized
+	subject rbac.Subject
+	action  rbac.Action
+
+	rw       sync.Mutex
+	usingSQL bool
+}
+
+func (s *PreparedRecorder) Authorize(ctx context.Context, object rbac.Object) error {
+	s.rw.Lock()
+	defer s.rw.Unlock()
+
+	if !s.usingSQL {
+		s.rec.recordAuthorize(s.subject, s.action, object)
+	}
+	return s.prepped.Authorize(ctx, object)
+}
+func (s *PreparedRecorder) CompileToSQL(ctx context.Context, cfg regosql.ConvertConfig) (string, error) {
+	s.rw.Lock()
+	defer s.rw.Unlock()
+
+	s.usingSQL = true
+	return s.prepped.CompileToSQL(ctx, cfg)
+}
+
+// FakeAuthorizer is an Authorizer that always returns the same error.
+type FakeAuthorizer struct {
+	// AlwaysReturn is the error that will be returned by Authorize.
+	AlwaysReturn error
+}
+
+var _ rbac.Authorizer = (*FakeAuthorizer)(nil)
+
+func (d *FakeAuthorizer) Authorize(_ context.Context, _ rbac.Subject, _ rbac.Action, _ rbac.Object) error {
+	return d.AlwaysReturn
+}
+
+func (d *FakeAuthorizer) Prepare(_ context.Context, subject rbac.Subject, action rbac.Action, _ string) (rbac.PreparedAuthorized, error) {
+	return &fakePreparedAuthorizer{
+		Original: d,
+		Subject:  subject,
+		Action:   action,
+	}, nil
+}
+
+var _ rbac.PreparedAuthorized = (*fakePreparedAuthorizer)(nil)
+
+// fakePreparedAuthorizer is the prepared version of a FakeAuthorizer. It will
+// return the same error as the original FakeAuthorizer.
 type fakePreparedAuthorizer struct {
-	Original            *RecordingAuthorizer
-	SubjectID           string
-	Roles               []string
-	Scope               rbac.Scope
-	Action              rbac.Action
-	Groups              []string
-	HardCodedSQLString  string
-	HardCodedRegoString string
+	sync.RWMutex
+	Original *FakeAuthorizer
+	Subject  rbac.Subject
+	Action   rbac.Action
 }
 
 func (f *fakePreparedAuthorizer) Authorize(ctx context.Context, object rbac.Object) error {
-	return f.Original.ByRoleName(ctx, f.SubjectID, f.Roles, f.Scope, f.Groups, f.Action, object)
+	return f.Original.Authorize(ctx, f.Subject, f.Action, object)
 }
 
-// Compile returns a compiled version of the authorizer that will work for
+// CompileToSQL returns a compiled version of the authorizer that will work for
 // in memory databases. This fake version will not work against a SQL database.
-func (f *fakePreparedAuthorizer) Compile() (rbac.AuthorizeFilter, error) {
-	return f, nil
+func (*fakePreparedAuthorizer) CompileToSQL(_ context.Context, _ regosql.ConvertConfig) (string, error) {
+	return "not a valid sql string", nil
 }
 
-func (f *fakePreparedAuthorizer) Eval(object rbac.Object) bool {
-	return f.Original.ByRoleNameSQL(context.Background(), f.SubjectID, f.Roles, f.Scope, f.Groups, f.Action, object) == nil
+// Random rbac helper funcs
+
+func RandomRBACAction() rbac.Action {
+	all := rbac.AllActions()
+	return all[must(cryptorand.Intn(len(all)))]
 }
 
-func (f fakePreparedAuthorizer) RegoString() string {
-	if f.HardCodedRegoString != "" {
-		return f.HardCodedRegoString
+func RandomRBACObject() rbac.Object {
+	return rbac.Object{
+		ID:    uuid.NewString(),
+		Owner: uuid.NewString(),
+		OrgID: uuid.NewString(),
+		Type:  randomRBACType(),
+		ACLUserList: map[string][]rbac.Action{
+			namesgenerator.GetRandomName(1): {RandomRBACAction()},
+		},
+		ACLGroupList: map[string][]rbac.Action{
+			namesgenerator.GetRandomName(1): {RandomRBACAction()},
+		},
 	}
-	panic("not implemented")
 }
 
-func (f fakePreparedAuthorizer) SQLString(_ rbac.SQLConfig) string {
-	if f.HardCodedSQLString != "" {
-		return f.HardCodedSQLString
+func randomRBACType() string {
+	all := []string{
+		rbac.ResourceWorkspace.Type,
+		rbac.ResourceWorkspaceExecution.Type,
+		rbac.ResourceWorkspaceApplicationConnect.Type,
+		rbac.ResourceAuditLog.Type,
+		rbac.ResourceTemplate.Type,
+		rbac.ResourceGroup.Type,
+		rbac.ResourceFile.Type,
+		rbac.ResourceProvisionerDaemon.Type,
+		rbac.ResourceOrganization.Type,
+		rbac.ResourceRoleAssignment.Type,
+		rbac.ResourceOrgRoleAssignment.Type,
+		rbac.ResourceAPIKey.Type,
+		rbac.ResourceUser.Type,
+		rbac.ResourceUserData.Type,
+		rbac.ResourceOrganizationMember.Type,
+		rbac.ResourceWildcard.Type,
+		rbac.ResourceLicense.Type,
+		rbac.ResourceDeploymentConfig.Type,
+		rbac.ResourceReplicas.Type,
+		rbac.ResourceDebugInfo.Type,
 	}
-	panic("not implemented")
+	return all[must(cryptorand.Intn(len(all)))]
+}
+
+func RandomRBACSubject() rbac.Subject {
+	return rbac.Subject{
+		ID:     uuid.NewString(),
+		Roles:  rbac.RoleNames{rbac.RoleMember()},
+		Groups: []string{namesgenerator.GetRandomName(1)},
+		Scope:  rbac.ScopeAll,
+	}
+}
+
+func must[T any](value T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return value
 }

@@ -150,6 +150,11 @@ var (
 	ResourceReplicas = Object{
 		Type: "replicas",
 	}
+
+	// ResourceDebugInfo controls access to the debug routes `/api/v2/debug/*`.
+	ResourceDebugInfo = Object{
+		Type: "debug_info",
+	}
 )
 
 // Object is used to create objects for authz checks when you have none in
@@ -158,6 +163,8 @@ var (
 // that represents the set of workspaces you are trying to get access too.
 // Do not export this type, as it can be created from a resource type constant.
 type Object struct {
+	// ID is the resource's uuid
+	ID    string `json:"id"`
 	Owner string `json:"owner"`
 	// OrgID specifies which org the object is a part of.
 	OrgID string `json:"org_owner"`
@@ -167,6 +174,49 @@ type Object struct {
 
 	ACLUserList  map[string][]Action ` json:"acl_user_list"`
 	ACLGroupList map[string][]Action ` json:"acl_group_list"`
+}
+
+func (z Object) Equal(b Object) bool {
+	if z.ID != b.ID {
+		return false
+	}
+	if z.Owner != b.Owner {
+		return false
+	}
+	if z.OrgID != b.OrgID {
+		return false
+	}
+	if z.Type != b.Type {
+		return false
+	}
+
+	if !equalACLLists(z.ACLUserList, b.ACLUserList) {
+		return false
+	}
+
+	if !equalACLLists(z.ACLGroupList, b.ACLGroupList) {
+		return false
+	}
+
+	return true
+}
+
+func equalACLLists(a, b map[string][]Action) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for k, actions := range a {
+		if len(actions) != len(b[k]) {
+			return false
+		}
+		for i, a := range actions {
+			if a != b[k][i] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (z Object) RBACObject() Object {
@@ -184,9 +234,32 @@ func (z Object) All() Object {
 	}
 }
 
+func (z Object) WithIDString(id string) Object {
+	return Object{
+		ID:           id,
+		Owner:        z.Owner,
+		OrgID:        z.OrgID,
+		Type:         z.Type,
+		ACLUserList:  z.ACLUserList,
+		ACLGroupList: z.ACLGroupList,
+	}
+}
+
+func (z Object) WithID(id uuid.UUID) Object {
+	return Object{
+		ID:           id.String(),
+		Owner:        z.Owner,
+		OrgID:        z.OrgID,
+		Type:         z.Type,
+		ACLUserList:  z.ACLUserList,
+		ACLGroupList: z.ACLGroupList,
+	}
+}
+
 // InOrg adds an org OwnerID to the resource
 func (z Object) InOrg(orgID uuid.UUID) Object {
 	return Object{
+		ID:           z.ID,
 		Owner:        z.Owner,
 		OrgID:        orgID.String(),
 		Type:         z.Type,
@@ -198,6 +271,7 @@ func (z Object) InOrg(orgID uuid.UUID) Object {
 // WithOwner adds an OwnerID to the resource
 func (z Object) WithOwner(ownerID string) Object {
 	return Object{
+		ID:           z.ID,
 		Owner:        ownerID,
 		OrgID:        z.OrgID,
 		Type:         z.Type,
@@ -209,6 +283,7 @@ func (z Object) WithOwner(ownerID string) Object {
 // WithACLUserList adds an ACL list to a given object
 func (z Object) WithACLUserList(acl map[string][]Action) Object {
 	return Object{
+		ID:           z.ID,
 		Owner:        z.Owner,
 		OrgID:        z.OrgID,
 		Type:         z.Type,
@@ -219,6 +294,7 @@ func (z Object) WithACLUserList(acl map[string][]Action) Object {
 
 func (z Object) WithGroupACL(groups map[string][]Action) Object {
 	return Object{
+		ID:           z.ID,
 		Owner:        z.Owner,
 		OrgID:        z.OrgID,
 		Type:         z.Type,

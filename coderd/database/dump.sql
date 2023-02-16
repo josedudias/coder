@@ -16,7 +16,9 @@ CREATE TYPE audit_action AS ENUM (
     'write',
     'delete',
     'start',
-    'stop'
+    'stop',
+    'login',
+    'logout'
 );
 
 CREATE TYPE build_reason AS ENUM (
@@ -91,12 +93,21 @@ CREATE TYPE resource_type AS ENUM (
     'git_ssh_key',
     'api_key',
     'group',
-    'workspace_build'
+    'workspace_build',
+    'license'
 );
 
 CREATE TYPE user_status AS ENUM (
     'active',
     'suspended'
+);
+
+CREATE TYPE workspace_agent_lifecycle_state AS ENUM (
+    'created',
+    'starting',
+    'start_timeout',
+    'start_error',
+    'ready'
 );
 
 CREATE TYPE workspace_app_health AS ENUM (
@@ -143,8 +154,8 @@ CREATE TABLE audit_logs (
     "time" timestamp with time zone NOT NULL,
     user_id uuid NOT NULL,
     organization_id uuid NOT NULL,
-    ip inet NOT NULL,
-    user_agent character varying(256) NOT NULL,
+    ip inet,
+    user_agent character varying(256),
     resource_type resource_type NOT NULL,
     resource_id uuid NOT NULL,
     resource_target text NOT NULL,
@@ -192,14 +203,16 @@ CREATE TABLE groups (
     id uuid NOT NULL,
     name text NOT NULL,
     organization_id uuid NOT NULL,
-    avatar_url text DEFAULT ''::text NOT NULL
+    avatar_url text DEFAULT ''::text NOT NULL,
+    quota_allowance integer DEFAULT 0 NOT NULL
 );
 
 CREATE TABLE licenses (
     id integer NOT NULL,
     uploaded_at timestamp with time zone NOT NULL,
     jwt text NOT NULL,
-    exp timestamp with time zone NOT NULL
+    exp timestamp with time zone NOT NULL,
+    uuid uuid NOT NULL
 );
 
 COMMENT ON COLUMN licenses.exp IS 'exp tracks the claim of the same name in the JWT, and we include it here so that we can easily query for licenses that have not yet expired.';
@@ -236,10 +249,10 @@ CREATE TABLE parameter_schemas (
     job_id uuid NOT NULL,
     name character varying(64) NOT NULL,
     description character varying(8192) DEFAULT ''::character varying NOT NULL,
-    default_source_scheme parameter_source_scheme,
+    default_source_scheme parameter_source_scheme NOT NULL,
     default_source_value text NOT NULL,
     allow_override_source boolean NOT NULL,
-    default_destination_scheme parameter_destination_scheme,
+    default_destination_scheme parameter_destination_scheme NOT NULL,
     allow_override_destination boolean NOT NULL,
     default_refresh text NOT NULL,
     redisplay_value boolean NOT NULL,
@@ -268,7 +281,8 @@ CREATE TABLE provisioner_daemons (
     updated_at timestamp with time zone,
     name character varying(64) NOT NULL,
     provisioners provisioner_type[] NOT NULL,
-    replica_id uuid
+    replica_id uuid,
+    tags jsonb DEFAULT '{}'::jsonb NOT NULL
 );
 
 CREATE TABLE provisioner_job_logs (
@@ -305,7 +319,8 @@ CREATE TABLE provisioner_jobs (
     type provisioner_job_type NOT NULL,
     input jsonb NOT NULL,
     worker_id uuid,
-    file_id uuid NOT NULL
+    file_id uuid NOT NULL,
+    tags jsonb DEFAULT '{"scope": "organization"}'::jsonb NOT NULL
 );
 
 CREATE TABLE replicas (
@@ -326,6 +341,72 @@ CREATE TABLE site_configs (
     key character varying(256) NOT NULL,
     value character varying(8192) NOT NULL
 );
+
+CREATE TABLE template_version_parameters (
+    template_version_id uuid NOT NULL,
+    name text NOT NULL,
+    description text NOT NULL,
+    type text NOT NULL,
+    mutable boolean NOT NULL,
+    default_value text NOT NULL,
+    icon text NOT NULL,
+    options jsonb DEFAULT '[]'::jsonb NOT NULL,
+    validation_regex text NOT NULL,
+    validation_min integer NOT NULL,
+    validation_max integer NOT NULL,
+    validation_error text DEFAULT ''::text NOT NULL,
+    validation_monotonic text DEFAULT ''::text NOT NULL,
+    CONSTRAINT validation_monotonic_order CHECK ((validation_monotonic = ANY (ARRAY['increasing'::text, 'decreasing'::text, ''::text])))
+);
+
+COMMENT ON COLUMN template_version_parameters.name IS 'Parameter name';
+
+COMMENT ON COLUMN template_version_parameters.description IS 'Parameter description';
+
+COMMENT ON COLUMN template_version_parameters.type IS 'Parameter type';
+
+COMMENT ON COLUMN template_version_parameters.mutable IS 'Is parameter mutable?';
+
+COMMENT ON COLUMN template_version_parameters.default_value IS 'Default value';
+
+COMMENT ON COLUMN template_version_parameters.icon IS 'Icon';
+
+COMMENT ON COLUMN template_version_parameters.options IS 'Additional options';
+
+COMMENT ON COLUMN template_version_parameters.validation_regex IS 'Validation: regex pattern';
+
+COMMENT ON COLUMN template_version_parameters.validation_min IS 'Validation: minimum length of value';
+
+COMMENT ON COLUMN template_version_parameters.validation_max IS 'Validation: maximum length of value';
+
+COMMENT ON COLUMN template_version_parameters.validation_error IS 'Validation: error displayed when the regex does not match.';
+
+COMMENT ON COLUMN template_version_parameters.validation_monotonic IS 'Validation: consecutive values preserve the monotonic order';
+
+CREATE TABLE template_version_variables (
+    template_version_id uuid NOT NULL,
+    name text NOT NULL,
+    description text NOT NULL,
+    type text NOT NULL,
+    value text NOT NULL,
+    default_value text NOT NULL,
+    required boolean NOT NULL,
+    sensitive boolean NOT NULL
+);
+
+COMMENT ON COLUMN template_version_variables.name IS 'Variable name';
+
+COMMENT ON COLUMN template_version_variables.description IS 'Variable description';
+
+COMMENT ON COLUMN template_version_variables.type IS 'Variable type';
+
+COMMENT ON COLUMN template_version_variables.value IS 'Variable value';
+
+COMMENT ON COLUMN template_version_variables.default_value IS 'Variable default value';
+
+COMMENT ON COLUMN template_version_variables.required IS 'Required variables needs a default value or a value provided by template admin';
+
+COMMENT ON COLUMN template_version_variables.sensitive IS 'Sensitive variables have their values redacted in logs or site UI';
 
 CREATE TABLE template_versions (
     id uuid NOT NULL,
@@ -354,12 +435,15 @@ CREATE TABLE templates (
     icon character varying(256) DEFAULT ''::character varying NOT NULL,
     user_acl jsonb DEFAULT '{}'::jsonb NOT NULL,
     group_acl jsonb DEFAULT '{}'::jsonb NOT NULL,
-    display_name character varying(64) DEFAULT ''::character varying NOT NULL
+    display_name character varying(64) DEFAULT ''::character varying NOT NULL,
+    allow_user_cancel_workspace_jobs boolean DEFAULT true NOT NULL
 );
 
 COMMENT ON COLUMN templates.default_ttl IS 'The default duration for auto-stop for workspaces created from this template.';
 
 COMMENT ON COLUMN templates.display_name IS 'Display name is a custom, human-friendly template name that user can set.';
+
+COMMENT ON COLUMN templates.allow_user_cancel_workspace_jobs IS 'Allow users to cancel in-progress workspace jobs.';
 
 CREATE TABLE user_links (
     user_id uuid NOT NULL,
@@ -406,7 +490,12 @@ CREATE TABLE workspace_agents (
     version text DEFAULT ''::text NOT NULL,
     last_connected_replica_id uuid,
     connection_timeout_seconds integer DEFAULT 0 NOT NULL,
-    troubleshooting_url text DEFAULT ''::text NOT NULL
+    troubleshooting_url text DEFAULT ''::text NOT NULL,
+    motd_file text DEFAULT ''::text NOT NULL,
+    lifecycle_state workspace_agent_lifecycle_state DEFAULT 'created'::workspace_agent_lifecycle_state NOT NULL,
+    login_before_ready boolean DEFAULT true NOT NULL,
+    startup_script_timeout_seconds integer DEFAULT 0 NOT NULL,
+    expanded_directory character varying(4096) DEFAULT ''::character varying NOT NULL
 );
 
 COMMENT ON COLUMN workspace_agents.version IS 'Version tracks the version of the currently running workspace agent. Workspace agents register their version upon start.';
@@ -414,6 +503,16 @@ COMMENT ON COLUMN workspace_agents.version IS 'Version tracks the version of the
 COMMENT ON COLUMN workspace_agents.connection_timeout_seconds IS 'Connection timeout in seconds, 0 means disabled.';
 
 COMMENT ON COLUMN workspace_agents.troubleshooting_url IS 'URL for troubleshooting the agent.';
+
+COMMENT ON COLUMN workspace_agents.motd_file IS 'Path to file inside workspace containing the message of the day (MOTD) to show to the user when logging in via SSH.';
+
+COMMENT ON COLUMN workspace_agents.lifecycle_state IS 'The current lifecycle state reported by the workspace agent.';
+
+COMMENT ON COLUMN workspace_agents.login_before_ready IS 'If true, the agent will not prevent login before it is ready (e.g. startup script is still executing).';
+
+COMMENT ON COLUMN workspace_agents.startup_script_timeout_seconds IS 'The number of seconds to wait for the startup script to complete. If the script does not complete within this time, the agent lifecycle will be marked as start_timeout.';
+
+COMMENT ON COLUMN workspace_agents.expanded_directory IS 'The resolved path of a user-specified directory. e.g. ~/coder -> /home/coder/coder';
 
 CREATE TABLE workspace_apps (
     id uuid NOT NULL,
@@ -429,8 +528,19 @@ CREATE TABLE workspace_apps (
     health workspace_app_health DEFAULT 'disabled'::workspace_app_health NOT NULL,
     subdomain boolean DEFAULT false NOT NULL,
     sharing_level app_sharing_level DEFAULT 'owner'::app_sharing_level NOT NULL,
-    slug text NOT NULL
+    slug text NOT NULL,
+    external boolean DEFAULT false NOT NULL
 );
+
+CREATE TABLE workspace_build_parameters (
+    workspace_build_id uuid NOT NULL,
+    name text NOT NULL,
+    value text NOT NULL
+);
+
+COMMENT ON COLUMN workspace_build_parameters.name IS 'Parameter name';
+
+COMMENT ON COLUMN workspace_build_parameters.value IS 'Parameter value';
 
 CREATE TABLE workspace_builds (
     id uuid NOT NULL,
@@ -444,15 +554,26 @@ CREATE TABLE workspace_builds (
     provisioner_state bytea,
     job_id uuid NOT NULL,
     deadline timestamp with time zone DEFAULT '0001-01-01 00:00:00+00'::timestamp with time zone NOT NULL,
-    reason build_reason DEFAULT 'initiator'::build_reason NOT NULL
+    reason build_reason DEFAULT 'initiator'::build_reason NOT NULL,
+    daily_cost integer DEFAULT 0 NOT NULL
 );
 
 CREATE TABLE workspace_resource_metadata (
     workspace_resource_id uuid NOT NULL,
     key character varying(1024) NOT NULL,
     value character varying(65536),
-    sensitive boolean NOT NULL
+    sensitive boolean NOT NULL,
+    id bigint NOT NULL
 );
+
+CREATE SEQUENCE workspace_resource_metadata_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+ALTER SEQUENCE workspace_resource_metadata_id_seq OWNED BY workspace_resource_metadata.id;
 
 CREATE TABLE workspace_resources (
     id uuid NOT NULL,
@@ -463,7 +584,8 @@ CREATE TABLE workspace_resources (
     name character varying(64) NOT NULL,
     hide boolean DEFAULT false NOT NULL,
     icon character varying(256) DEFAULT ''::character varying NOT NULL,
-    instance_type character varying(256)
+    instance_type character varying(256),
+    daily_cost integer DEFAULT 0 NOT NULL
 );
 
 CREATE TABLE workspaces (
@@ -483,6 +605,8 @@ CREATE TABLE workspaces (
 ALTER TABLE ONLY licenses ALTER COLUMN id SET DEFAULT nextval('licenses_id_seq'::regclass);
 
 ALTER TABLE ONLY provisioner_job_logs ALTER COLUMN id SET DEFAULT nextval('provisioner_job_logs_id_seq'::regclass);
+
+ALTER TABLE ONLY workspace_resource_metadata ALTER COLUMN id SET DEFAULT nextval('workspace_resource_metadata_id_seq'::regclass);
 
 ALTER TABLE ONLY agent_stats
     ADD CONSTRAINT agent_stats_pkey PRIMARY KEY (id);
@@ -553,6 +677,12 @@ ALTER TABLE ONLY provisioner_jobs
 ALTER TABLE ONLY site_configs
     ADD CONSTRAINT site_configs_key_key UNIQUE (key);
 
+ALTER TABLE ONLY template_version_parameters
+    ADD CONSTRAINT template_version_parameters_template_version_id_name_key UNIQUE (template_version_id, name);
+
+ALTER TABLE ONLY template_version_variables
+    ADD CONSTRAINT template_version_variables_template_version_id_name_key UNIQUE (template_version_id, name);
+
 ALTER TABLE ONLY template_versions
     ADD CONSTRAINT template_versions_pkey PRIMARY KEY (id);
 
@@ -577,6 +707,9 @@ ALTER TABLE ONLY workspace_apps
 ALTER TABLE ONLY workspace_apps
     ADD CONSTRAINT workspace_apps_pkey PRIMARY KEY (id);
 
+ALTER TABLE ONLY workspace_build_parameters
+    ADD CONSTRAINT workspace_build_parameters_workspace_build_id_name_key UNIQUE (workspace_build_id, name);
+
 ALTER TABLE ONLY workspace_builds
     ADD CONSTRAINT workspace_builds_job_id_key UNIQUE (job_id);
 
@@ -587,7 +720,10 @@ ALTER TABLE ONLY workspace_builds
     ADD CONSTRAINT workspace_builds_workspace_id_build_number_key UNIQUE (workspace_id, build_number);
 
 ALTER TABLE ONLY workspace_resource_metadata
-    ADD CONSTRAINT workspace_resource_metadata_pkey PRIMARY KEY (workspace_resource_id, key);
+    ADD CONSTRAINT workspace_resource_metadata_name UNIQUE (workspace_resource_id, key);
+
+ALTER TABLE ONLY workspace_resource_metadata
+    ADD CONSTRAINT workspace_resource_metadata_pkey PRIMARY KEY (id);
 
 ALTER TABLE ONLY workspace_resources
     ADD CONSTRAINT workspace_resources_pkey PRIMARY KEY (id);
@@ -621,11 +757,19 @@ CREATE UNIQUE INDEX idx_users_email ON users USING btree (email) WHERE (deleted 
 
 CREATE UNIQUE INDEX idx_users_username ON users USING btree (username) WHERE (deleted = false);
 
+CREATE INDEX provisioner_job_logs_id_job_id_idx ON provisioner_job_logs USING btree (job_id, id);
+
+CREATE INDEX provisioner_jobs_started_at_idx ON provisioner_jobs USING btree (started_at) WHERE (started_at IS NULL);
+
 CREATE UNIQUE INDEX templates_organization_id_name_idx ON templates USING btree (organization_id, lower((name)::text)) WHERE (deleted = false);
 
 CREATE UNIQUE INDEX users_email_lower_idx ON users USING btree (lower(email)) WHERE (deleted = false);
 
 CREATE UNIQUE INDEX users_username_lower_idx ON users USING btree (lower(username)) WHERE (deleted = false);
+
+CREATE INDEX workspace_agents_auth_token_idx ON workspace_agents USING btree (auth_token);
+
+CREATE INDEX workspace_agents_resource_id_idx ON workspace_agents USING btree (resource_id);
 
 CREATE INDEX workspace_resources_job_id_idx ON workspace_resources USING btree (job_id);
 
@@ -661,6 +805,12 @@ ALTER TABLE ONLY provisioner_job_logs
 ALTER TABLE ONLY provisioner_jobs
     ADD CONSTRAINT provisioner_jobs_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE;
 
+ALTER TABLE ONLY template_version_parameters
+    ADD CONSTRAINT template_version_parameters_template_version_id_fkey FOREIGN KEY (template_version_id) REFERENCES template_versions(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY template_version_variables
+    ADD CONSTRAINT template_version_variables_template_version_id_fkey FOREIGN KEY (template_version_id) REFERENCES template_versions(id) ON DELETE CASCADE;
+
 ALTER TABLE ONLY template_versions
     ADD CONSTRAINT template_versions_created_by_fkey FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT;
 
@@ -684,6 +834,9 @@ ALTER TABLE ONLY workspace_agents
 
 ALTER TABLE ONLY workspace_apps
     ADD CONSTRAINT workspace_apps_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES workspace_agents(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY workspace_build_parameters
+    ADD CONSTRAINT workspace_build_parameters_workspace_build_id_fkey FOREIGN KEY (workspace_build_id) REFERENCES workspace_builds(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY workspace_builds
     ADD CONSTRAINT workspace_builds_job_id_fkey FOREIGN KEY (job_id) REFERENCES provisioner_jobs(id) ON DELETE CASCADE;

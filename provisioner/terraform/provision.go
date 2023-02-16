@@ -12,6 +12,7 @@ import (
 
 	"github.com/coder/coder/provisionersdk"
 	"github.com/coder/coder/provisionersdk/proto"
+	"github.com/coder/terraform-provider-coder/provider"
 )
 
 // Provision executes `terraform apply` or `terraform plan` for dry runs.
@@ -137,8 +138,7 @@ func (s *server) Provision(stream proto.DRPCProvisioner_ProvisionStream) error {
 		return xerrors.Errorf("initialize terraform: %w", err)
 	}
 	s.logger.Debug(ctx, "ran initialization")
-
-	env, err := provisionEnv(config, request.GetPlan().GetParameterValues())
+	env, err := provisionEnv(config, request.GetPlan().GetParameterValues(), request.GetPlan().GetRichParameterValues())
 	if err != nil {
 		return err
 	}
@@ -201,10 +201,13 @@ func planVars(plan *proto.Provision_Plan) ([]string, error) {
 			return nil, xerrors.Errorf("unsupported parameter type %q for %q", param.DestinationScheme, param.Name)
 		}
 	}
+	for _, variable := range plan.VariableValues {
+		vars = append(vars, fmt.Sprintf("%s=%s", variable.Name, variable.Value))
+	}
 	return vars, nil
 }
 
-func provisionEnv(config *proto.Provision_Config, params []*proto.ParameterValue) ([]string, error) {
+func provisionEnv(config *proto.Provision_Config, params []*proto.ParameterValue, richParams []*proto.RichParameterValue) ([]string, error) {
 	env := safeEnviron()
 	env = append(env,
 		"CODER_AGENT_URL="+config.Metadata.CoderUrl,
@@ -227,6 +230,9 @@ func provisionEnv(config *proto.Provision_Config, params []*proto.ParameterValue
 		default:
 			return nil, xerrors.Errorf("unsupported parameter type %q for %q", param.DestinationScheme, param.Name)
 		}
+	}
+	for _, param := range richParams {
+		env = append(env, provider.ParameterEnvironmentVariable(param.Name)+"="+param.Value)
 	}
 	return env, nil
 }

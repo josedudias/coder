@@ -1,8 +1,10 @@
 {
   "cSpell.words": [
     "afero",
+    "agentsdk",
     "apps",
     "ASKPASS",
+    "autostop",
     "awsidentity",
     "bodyclose",
     "buildinfo",
@@ -17,6 +19,7 @@
     "codersdk",
     "cronstrue",
     "databasefake",
+    "dbtype",
     "DERP",
     "derphttp",
     "derpmap",
@@ -32,6 +35,7 @@
     "enablements",
     "errgroup",
     "eventsourcemock",
+    "Failf",
     "fatih",
     "Formik",
     "gitauth",
@@ -105,6 +109,7 @@
     "slogtest",
     "sourcemapped",
     "Srcs",
+    "stdbuf",
     "stretchr",
     "STTY",
     "stuntest",
@@ -114,6 +119,7 @@
     "tailnet",
     "tailnettest",
     "Tailscale",
+    "tbody",
     "TCGETS",
     "tcpip",
     "TCSETS",
@@ -125,8 +131,11 @@
     "tfjson",
     "tfplan",
     "tfstate",
+    "thead",
     "tios",
+    "tmpdir",
     "tparallel",
+    "trialer",
     "trimprefix",
     "tsdial",
     "tslogger",
@@ -158,10 +167,7 @@
     "xstate",
     "yamux"
   ],
-  "cSpell.ignorePaths": [
-    "site/package.json",
-    ".vscode/settings.json"
-  ],
+  "cSpell.ignorePaths": ["site/package.json", ".vscode/settings.json"],
   "emeraldwalk.runonsave": {
     "commands": [
       {
@@ -178,6 +184,10 @@
   "files.exclude": {
     "**/node_modules": true
   },
+  "search.exclude": {
+    "scripts/metricsdocgen/metrics": true,
+    "docs/api/*.md": true
+  },
   // Ensure files always have a newline.
   "files.insertFinalNewline": true,
   "go.lintTool": "golangci-lint",
@@ -193,11 +203,15 @@
   // To reduce redundancy in tests, it's covered by other packages.
   // Since package coverage pairing can't be defined, all packages cover
   // all other packages.
-  "go.testFlags": [
-    "-short",
-    "-coverpkg=./..."
-  ],
+  "go.testFlags": ["-short", "-coverpkg=./..."],
   // We often use a version of TypeScript that's ahead of the version shipped
   // with VS Code.
-  "typescript.tsdk": "./site/node_modules/typescript/lib"
+  "typescript.tsdk": "./site/node_modules/typescript/lib",
+  "grammarly.selectors": [
+    {
+      "language": "markdown",
+      "scheme": "file",
+      "pattern": "docs/contributing/frontend.md"
+    }
+  ]
 }

@@ -26,7 +26,7 @@ func gitAskpass() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 
-			ctx, stop := signal.NotifyContext(ctx, interruptSignals...)
+			ctx, stop := signal.NotifyContext(ctx, InterruptSignals...)
 			defer stop()
 
 			user, host, err := gitauth.ParseAskpass(args[0])
@@ -39,7 +39,7 @@ func gitAskpass() *cobra.Command {
 				return xerrors.Errorf("create agent client: %w", err)
 			}
 
-			token, err := client.WorkspaceAgentGitAuth(ctx, host, false)
+			token, err := client.GitAuth(ctx, host, false)
 			if err != nil {
 				var apiError *codersdk.Error
 				if errors.As(err, &apiError) && apiError.StatusCode() == http.StatusNotFound {
@@ -51,30 +51,30 @@ func gitAskpass() *cobra.Command {
 				return xerrors.Errorf("get git token: %w", err)
 			}
 			if token.URL != "" {
-				if err := openURL(cmd, token.URL); err != nil {
+				if err := openURL(cmd, token.URL); err == nil {
 					cmd.Printf("Your browser has been opened to authenticate with Git:\n\n\t%s\n\n", token.URL)
 				} else {
 					cmd.Printf("Open the following URL to authenticate with Git:\n\n\t%s\n\n", token.URL)
 				}
 
 				for r := retry.New(250*time.Millisecond, 10*time.Second); r.Wait(ctx); {
-					token, err = client.WorkspaceAgentGitAuth(ctx, host, true)
+					token, err = client.GitAuth(ctx, host, true)
 					if err != nil {
 						continue
 					}
-					cmd.Printf("\nYou've been authenticated with Git!\n")
+					cmd.Printf("You've been authenticated with Git!\n")
 					break
 				}
 			}
 
 			if token.Password != "" {
 				if user == "" {
-					fmt.Fprintln(cmd.OutOrStdout(), token.Username)
+					_, _ = fmt.Fprintln(cmd.OutOrStdout(), token.Username)
 				} else {
-					fmt.Fprintln(cmd.OutOrStdout(), token.Password)
+					_, _ = fmt.Fprintln(cmd.OutOrStdout(), token.Password)
 				}
 			} else {
-				fmt.Fprintln(cmd.OutOrStdout(), token.Username)
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), token.Username)
 			}
 
 			return nil

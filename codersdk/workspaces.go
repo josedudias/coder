@@ -17,20 +17,22 @@ import (
 // Workspace is a deployment of a template. It references a specific
 // version and can be updated.
 type Workspace struct {
-	ID                uuid.UUID      `json:"id"`
-	CreatedAt         time.Time      `json:"created_at"`
-	UpdatedAt         time.Time      `json:"updated_at"`
-	OwnerID           uuid.UUID      `json:"owner_id"`
-	OwnerName         string         `json:"owner_name"`
-	TemplateID        uuid.UUID      `json:"template_id"`
-	TemplateName      string         `json:"template_name"`
-	TemplateIcon      string         `json:"template_icon"`
-	LatestBuild       WorkspaceBuild `json:"latest_build"`
-	Outdated          bool           `json:"outdated"`
-	Name              string         `json:"name"`
-	AutostartSchedule *string        `json:"autostart_schedule,omitempty"`
-	TTLMillis         *int64         `json:"ttl_ms,omitempty"`
-	LastUsedAt        time.Time      `json:"last_used_at"`
+	ID                                   uuid.UUID      `json:"id" format:"uuid"`
+	CreatedAt                            time.Time      `json:"created_at" format:"date-time"`
+	UpdatedAt                            time.Time      `json:"updated_at" format:"date-time"`
+	OwnerID                              uuid.UUID      `json:"owner_id" format:"uuid"`
+	OwnerName                            string         `json:"owner_name"`
+	TemplateID                           uuid.UUID      `json:"template_id" format:"uuid"`
+	TemplateName                         string         `json:"template_name"`
+	TemplateDisplayName                  string         `json:"template_display_name"`
+	TemplateIcon                         string         `json:"template_icon"`
+	TemplateAllowUserCancelWorkspaceJobs bool           `json:"template_allow_user_cancel_workspace_jobs"`
+	LatestBuild                          WorkspaceBuild `json:"latest_build"`
+	Outdated                             bool           `json:"outdated"`
+	Name                                 string         `json:"name"`
+	AutostartSchedule                    *string        `json:"autostart_schedule,omitempty"`
+	TTLMillis                            *int64         `json:"ttl_ms,omitempty"`
+	LastUsedAt                           time.Time      `json:"last_used_at" format:"date-time"`
 }
 
 type WorkspacesRequest struct {
@@ -45,7 +47,7 @@ type WorkspacesResponse struct {
 
 // CreateWorkspaceBuildRequest provides options to update the latest workspace build.
 type CreateWorkspaceBuildRequest struct {
-	TemplateVersionID uuid.UUID           `json:"template_version_id,omitempty"`
+	TemplateVersionID uuid.UUID           `json:"template_version_id,omitempty" format:"uuid"`
 	Transition        WorkspaceTransition `json:"transition" validate:"oneof=create start stop delete,required"`
 	DryRun            bool                `json:"dry_run,omitempty"`
 	ProvisionerState  []byte              `json:"state,omitempty"`
@@ -54,7 +56,8 @@ type CreateWorkspaceBuildRequest struct {
 	// ParameterValues are optional. It will write params to the 'workspace' scope.
 	// This will overwrite any existing parameters with the same name.
 	// This will not delete old params not included in this list.
-	ParameterValues []CreateParameterRequest `json:"parameter_values,omitempty"`
+	ParameterValues     []CreateParameterRequest  `json:"parameter_values,omitempty"`
+	RichParameterValues []WorkspaceBuildParameter `json:"rich_parameter_values,omitempty"`
 }
 
 type WorkspaceOptions struct {
@@ -93,7 +96,7 @@ func (c *Client) getWorkspace(ctx context.Context, id uuid.UUID, opts ...Request
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return Workspace{}, readBodyAsError(res)
+		return Workspace{}, ReadBodyAsError(res)
 	}
 	var workspace Workspace
 	return workspace, json.NewDecoder(res.Body).Decode(&workspace)
@@ -116,7 +119,7 @@ func (c *Client) WorkspaceBuilds(ctx context.Context, req WorkspaceBuildsRequest
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return nil, readBodyAsError(res)
+		return nil, ReadBodyAsError(res)
 	}
 	var workspaceBuild []WorkspaceBuild
 	return workspaceBuild, json.NewDecoder(res.Body).Decode(&workspaceBuild)
@@ -130,7 +133,7 @@ func (c *Client) CreateWorkspaceBuild(ctx context.Context, workspace uuid.UUID, 
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusCreated {
-		return WorkspaceBuild{}, readBodyAsError(res)
+		return WorkspaceBuild{}, ReadBodyAsError(res)
 	}
 	var workspaceBuild WorkspaceBuild
 	return workspaceBuild, json.NewDecoder(res.Body).Decode(&workspaceBuild)
@@ -145,7 +148,7 @@ func (c *Client) WatchWorkspace(ctx context.Context, id uuid.UUID) (<-chan Works
 		return nil, err
 	}
 	if res.StatusCode != http.StatusOK {
-		return nil, readBodyAsError(res)
+		return nil, ReadBodyAsError(res)
 	}
 	nextEvent := ServerSentEventReader(ctx, res.Body)
 
@@ -195,7 +198,7 @@ func (c *Client) UpdateWorkspace(ctx context.Context, id uuid.UUID, req UpdateWo
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusNoContent {
-		return readBodyAsError(res)
+		return ReadBodyAsError(res)
 	}
 	return nil
 }
@@ -215,7 +218,7 @@ func (c *Client) UpdateWorkspaceAutostart(ctx context.Context, id uuid.UUID, req
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusNoContent {
-		return readBodyAsError(res)
+		return ReadBodyAsError(res)
 	}
 	return nil
 }
@@ -235,7 +238,7 @@ func (c *Client) UpdateWorkspaceTTL(ctx context.Context, id uuid.UUID, req Updat
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusNoContent {
-		return readBodyAsError(res)
+		return ReadBodyAsError(res)
 	}
 	return nil
 }
@@ -243,7 +246,7 @@ func (c *Client) UpdateWorkspaceTTL(ctx context.Context, id uuid.UUID, req Updat
 // PutExtendWorkspaceRequest is a request to extend the deadline of
 // the active workspace build.
 type PutExtendWorkspaceRequest struct {
-	Deadline time.Time `json:"deadline" validate:"required"`
+	Deadline time.Time `json:"deadline" validate:"required" format:"date-time"`
 }
 
 // PutExtendWorkspace updates the deadline for resources of the latest workspace build.
@@ -255,7 +258,7 @@ func (c *Client) PutExtendWorkspace(ctx context.Context, id uuid.UUID, req PutEx
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusNotModified {
-		return readBodyAsError(res)
+		return ReadBodyAsError(res)
 	}
 	return nil
 }
@@ -320,7 +323,7 @@ func (c *Client) Workspaces(ctx context.Context, filter WorkspaceFilter) (Worksp
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return WorkspacesResponse{}, readBodyAsError(res)
+		return WorkspacesResponse{}, ReadBodyAsError(res)
 	}
 
 	var wres WorkspacesResponse
@@ -340,36 +343,29 @@ func (c *Client) WorkspaceByOwnerAndName(ctx context.Context, owner string, name
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return Workspace{}, readBodyAsError(res)
+		return Workspace{}, ReadBodyAsError(res)
 	}
 
 	var workspace Workspace
 	return workspace, json.NewDecoder(res.Body).Decode(&workspace)
 }
 
-type GetAppHostResponse struct {
-	Host string `json:"host"`
+type WorkspaceQuota struct {
+	CreditsConsumed int `json:"credits_consumed"`
+	Budget          int `json:"budget"`
 }
 
-// GetAppHost returns the site-wide application wildcard hostname without the
-// leading "*.", e.g. "apps.coder.com". Apps are accessible at:
-// "<app-name>--<agent-name>--<workspace-name>--<username>.<app-host>", e.g.
-// "my-app--agent--workspace--username.apps.coder.com".
-//
-// If the app host is not set, the response will contain an empty string.
-func (c *Client) GetAppHost(ctx context.Context) (GetAppHostResponse, error) {
-	res, err := c.Request(ctx, http.MethodGet, "/api/v2/applications/host", nil)
+func (c *Client) WorkspaceQuota(ctx context.Context, userID string) (WorkspaceQuota, error) {
+	res, err := c.Request(ctx, http.MethodGet, fmt.Sprintf("/api/v2/workspace-quota/%s", userID), nil)
 	if err != nil {
-		return GetAppHostResponse{}, err
+		return WorkspaceQuota{}, err
 	}
 	defer res.Body.Close()
-
 	if res.StatusCode != http.StatusOK {
-		return GetAppHostResponse{}, readBodyAsError(res)
+		return WorkspaceQuota{}, ReadBodyAsError(res)
 	}
-
-	var host GetAppHostResponse
-	return host, json.NewDecoder(res.Body).Decode(&host)
+	var quota WorkspaceQuota
+	return quota, json.NewDecoder(res.Body).Decode(&quota)
 }
 
 // WorkspaceNotifyChannel is the PostgreSQL NOTIFY

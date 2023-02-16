@@ -10,6 +10,7 @@ import (
 	"github.com/coder/coder/codersdk"
 	"github.com/coder/coder/enterprise/cli"
 	"github.com/coder/coder/enterprise/coderd/coderdenttest"
+	"github.com/coder/coder/enterprise/coderd/license"
 	"github.com/coder/coder/pty/ptytest"
 	"github.com/coder/coder/testutil"
 )
@@ -24,12 +25,14 @@ func TestGroupList(t *testing.T) {
 		admin := coderdtest.CreateFirstUser(t, client)
 
 		_ = coderdenttest.AddLicense(t, client, coderdenttest.LicenseOptions{
-			TemplateRBAC: true,
+			Features: license.Features{
+				codersdk.FeatureTemplateRBAC: 1,
+			},
 		})
 
 		ctx, _ := testutil.Context(t)
-		_, user1 := coderdtest.CreateAnotherUserWithUser(t, client, admin.OrganizationID)
-		_, user2 := coderdtest.CreateAnotherUserWithUser(t, client, admin.OrganizationID)
+		_, user1 := coderdtest.CreateAnotherUser(t, client, admin.OrganizationID)
+		_, user2 := coderdtest.CreateAnotherUser(t, client, admin.OrganizationID)
 
 		// We intentionally create the first group as beta so that we
 		// can assert that things are being sorted by name intentionally
@@ -81,7 +84,9 @@ func TestGroupList(t *testing.T) {
 		_ = coderdtest.CreateFirstUser(t, client)
 
 		_ = coderdenttest.AddLicense(t, client, coderdenttest.LicenseOptions{
-			TemplateRBAC: true,
+			Features: license.Features{
+				codersdk.FeatureTemplateRBAC: 1,
+			},
 		})
 
 		cmd, root := clitest.NewWithSubcommands(t, cli.EnterpriseSubcommands(), "groups", "list")

@@ -16,6 +16,17 @@ import (
 	"github.com/coder/coder/codersdk"
 )
 
+// @Summary Assign role to organization member
+// @ID assign-role-to-organization-member
+// @Security CoderSessionToken
+// @Accept json
+// @Produce json
+// @Tags Members
+// @Param organization path string true "Organization ID"
+// @Param user path string true "User ID, name, or me"
+// @Param request body codersdk.UpdateRoles true "Update roles request"
+// @Success 200 {object} codersdk.OrganizationMember
+// @Router /organizations/{organization}/members/{user}/roles [put]
 func (api *API) putMemberRoles(rw http.ResponseWriter, r *http.Request) {
 	var (
 		ctx          = r.Context()
@@ -44,20 +55,20 @@ func (api *API) putMemberRoles(rw http.ResponseWriter, r *http.Request) {
 
 	// Assigning a role requires the create permission.
 	if len(added) > 0 && !api.Authorize(r, rbac.ActionCreate, rbac.ResourceOrgRoleAssignment.InOrg(organization.ID)) {
-		httpapi.Forbidden(rw)
+		httpapi.ResourceNotFound(rw)
 		return
 	}
 
 	// Removing a role requires the delete permission.
 	if len(removed) > 0 && !api.Authorize(r, rbac.ActionDelete, rbac.ResourceOrgRoleAssignment.InOrg(organization.ID)) {
-		httpapi.Forbidden(rw)
+		httpapi.ResourceNotFound(rw)
 		return
 	}
 
 	// Just treat adding & removing as "assigning" for now.
 	for _, roleName := range append(added, removed...) {
-		if !rbac.CanAssignRole(actorRoles.Roles, roleName) {
-			httpapi.Forbidden(rw)
+		if !rbac.CanAssignRole(actorRoles.Actor.Roles, roleName) {
+			httpapi.ResourceNotFound(rw)
 			return
 		}
 	}

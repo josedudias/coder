@@ -1,10 +1,21 @@
+import { withDefaultFeatures } from "./../api/api"
 import { FieldError } from "api/errors"
 import { everyOneGroup } from "util/groups"
 import * as Types from "../api/types"
 import * as TypesGen from "../api/typesGenerated"
-import { range } from "lodash"
+import range from "lodash/range"
+import { Permissions } from "xServices/auth/authXService"
+import { TemplateVersionFiles } from "util/templateVersion"
+import { FileTree } from "util/filetree"
 
 export const MockTemplateDAUResponse: TypesGen.TemplateDAUsResponse = {
+  entries: [
+    { date: "2022-08-27T00:00:00Z", amount: 1 },
+    { date: "2022-08-29T00:00:00Z", amount: 2 },
+    { date: "2022-08-30T00:00:00Z", amount: 1 },
+  ],
+}
+export const MockDeploymentDAUResponse: TypesGen.DeploymentDAUsResponse = {
   entries: [
     { date: "2022-08-27T00:00:00Z", amount: 1 },
     { date: "2022-08-29T00:00:00Z", amount: 2 },
@@ -19,8 +30,39 @@ export const MockAPIKey: TypesGen.GenerateAPIKeyResponse = {
   key: "my-api-key",
 }
 
+export const MockTokens: TypesGen.APIKey[] = [
+  {
+    id: "tBoVE3dqLl",
+    user_id: "f9ee61d8-1d84-4410-ab6e-c1ec1a641e0b",
+    last_used: "0001-01-01T00:00:00Z",
+    expires_at: "2023-01-15T20:10:45.637438Z",
+    created_at: "2022-12-16T20:10:45.637452Z",
+    updated_at: "2022-12-16T20:10:45.637452Z",
+    login_type: "token",
+    scope: "all",
+    lifetime_seconds: 2592000,
+  },
+  {
+    id: "tBoVE3dqLl",
+    user_id: "f9ee61d8-1d84-4410-ab6e-c1ec1a641e0b",
+    last_used: "0001-01-01T00:00:00Z",
+    expires_at: "2023-01-15T20:10:45.637438Z",
+    created_at: "2022-12-16T20:10:45.637452Z",
+    updated_at: "2022-12-16T20:10:45.637452Z",
+    login_type: "token",
+    scope: "all",
+    lifetime_seconds: 2592000,
+  },
+]
+
 export const MockBuildInfo: TypesGen.BuildInfoResponse = {
   external_url: "file:///mock-url",
+  version: "v99.999.9999+c9cdf14",
+}
+
+export const MockUpdateCheck: TypesGen.UpdateCheckResponse = {
+  current: true,
+  url: "file:///mock-url",
   version: "v99.999.9999+c9cdf14",
 }
 
@@ -83,10 +125,6 @@ export const MockUser: TypesGen.User = {
   last_seen_at: "",
 }
 
-export const MockUserCountResponse: TypesGen.UserCountResponse = {
-  count: 26,
-}
-
 export const MockUserAdmin: TypesGen.User = {
   id: "test-user",
   username: "TestUser",
@@ -135,6 +173,7 @@ export const MockProvisioner: TypesGen.ProvisionerDaemon = {
   id: "test-provisioner",
   name: "Test Provisioner",
   provisioners: ["echo"],
+  tags: {},
 }
 
 export const MockProvisionerJob: TypesGen.ProvisionerJob = {
@@ -143,6 +182,7 @@ export const MockProvisionerJob: TypesGen.ProvisionerJob = {
   status: "succeeded",
   file_id: "fc0774ce-cc9e-48d4-80ae-88f7a4d4a8b0",
   completed_at: "2022-05-17T17:39:01.382927298Z",
+  tags: {},
 }
 
 export const MockFailedProvisionerJob: TypesGen.ProvisionerJob = {
@@ -183,6 +223,23 @@ You can add instructions here
   created_by: MockUser,
 }
 
+export const MockTemplateVersion2: TypesGen.TemplateVersion = {
+  id: "test-template-version-2",
+  created_at: "2022-05-17T17:39:01.382927298Z",
+  updated_at: "2022-05-17T17:39:01.382927298Z",
+  template_id: "test-template",
+  job: MockProvisionerJob,
+  name: "test-version-2",
+  readme: `---
+name:Template test 2
+---
+## Instructions
+You can add instructions here
+
+[Some link info](https://coder.com)`,
+  created_by: MockUser,
+}
+
 export const MockTemplate: TypesGen.Template = {
   id: "test-template",
   created_at: "2022-05-17T17:39:01.382927298Z",
@@ -192,18 +249,95 @@ export const MockTemplate: TypesGen.Template = {
   display_name: "Test Template",
   provisioner: MockProvisioner.provisioners[0],
   active_version_id: MockTemplateVersion.id,
-  workspace_owner_count: 2,
   active_user_count: 1,
   build_time_stats: {
-    start_ms: 1000,
-    stop_ms: 2000,
-    delete_ms: 3000,
+    start: {
+      P50: 1000,
+      P95: 1500,
+    },
+    stop: {
+      P50: 1000,
+      P95: 1500,
+    },
+    delete: {
+      P50: 1000,
+      P95: 1500,
+    },
   },
   description: "This is a test description.",
   default_ttl_ms: 24 * 60 * 60 * 1000,
   created_by_id: "test-creator-id",
   created_by_name: "test_creator",
   icon: "/icon/code.svg",
+  allow_user_cancel_workspace_jobs: true,
+}
+
+export const MockTemplateVersionFiles: TemplateVersionFiles = {
+  "README.md": "# Example\n\nThis is an example template.",
+  "main.tf": `// Provides info about the workspace.
+data "coder_workspace" "me" {}
+
+// Provides the startup script used to download
+// the agent and communicate with Coder.
+resource "coder_agent" "dev" {
+os = "linux"
+arch = "amd64"
+}
+
+resource "kubernetes_pod" "main" {
+// Ensures that the Pod dies when the workspace shuts down!
+count = data.coder_workspace.me.start_count
+metadata {
+  name      = "dev-\${data.coder_workspace.me.id}"
+}
+spec {
+  container {
+    image   = "ubuntu"
+    command = ["sh", "-c", coder_agent.main.init_script]
+    env {
+      name  = "CODER_AGENT_TOKEN"
+      value = coder_agent.main.token
+    }
+  }
+}
+}
+`,
+}
+
+export const MockTemplateVersionFileTree: FileTree = {
+  "README.md": "# Example\n\nThis is an example template.",
+  "main.tf": `// Provides info about the workspace.
+data "coder_workspace" "me" {}
+
+// Provides the startup script used to download
+// the agent and communicate with Coder.
+resource "coder_agent" "dev" {
+os = "linux"
+arch = "amd64"
+}
+
+resource "kubernetes_pod" "main" {
+// Ensures that the Pod dies when the workspace shuts down!
+count = data.coder_workspace.me.start_count
+metadata {
+  name      = "dev-\${data.coder_workspace.me.id}"
+}
+spec {
+  container {
+    image   = "ubuntu"
+    command = ["sh", "-c", coder_agent.main.init_script]
+    env {
+      name  = "CODER_AGENT_TOKEN"
+      value = coder_agent.main.token
+    }
+  }
+}
+}
+`,
+  images: {
+    "java.Dockerfile": "FROM eclipse-temurin:17-jdk-jammy",
+    "python.Dockerfile": "FROM python:3.8-slim-buster",
+  },
 }
 
 export const MockWorkspaceApp: TypesGen.WorkspaceApp = {
@@ -213,6 +347,8 @@ export const MockWorkspaceApp: TypesGen.WorkspaceApp = {
   icon: "",
   subdomain: false,
   health: "disabled",
+  external: false,
+  url: "",
   sharing_level: "owner",
   healthcheck: {
     url: "",
@@ -241,6 +377,9 @@ export const MockWorkspaceAgent: TypesGen.WorkspaceAgent = {
   },
   connection_timeout_seconds: 120,
   troubleshooting_url: "https://coder.com/troubleshoot",
+  lifecycle_state: "starting",
+  login_before_ready: false,
+  startup_script_timeout_seconds: 120,
 }
 
 export const MockWorkspaceAgentDisconnected: TypesGen.WorkspaceAgent = {
@@ -250,6 +389,7 @@ export const MockWorkspaceAgentDisconnected: TypesGen.WorkspaceAgent = {
   status: "disconnected",
   version: "",
   latency: {},
+  lifecycle_state: "ready",
 }
 
 export const MockWorkspaceAgentOutdated: TypesGen.WorkspaceAgent = {
@@ -273,6 +413,7 @@ export const MockWorkspaceAgentOutdated: TypesGen.WorkspaceAgent = {
       latency_ms: 221.66,
     },
   },
+  lifecycle_state: "ready",
 }
 
 export const MockWorkspaceAgentConnecting: TypesGen.WorkspaceAgent = {
@@ -282,6 +423,7 @@ export const MockWorkspaceAgentConnecting: TypesGen.WorkspaceAgent = {
   status: "connecting",
   version: "",
   latency: {},
+  lifecycle_state: "created",
 }
 
 export const MockWorkspaceAgentTimeout: TypesGen.WorkspaceAgent = {
@@ -291,6 +433,28 @@ export const MockWorkspaceAgentTimeout: TypesGen.WorkspaceAgent = {
   status: "timeout",
   version: "",
   latency: {},
+  lifecycle_state: "created",
+}
+
+export const MockWorkspaceAgentStarting: TypesGen.WorkspaceAgent = {
+  ...MockWorkspaceAgent,
+  id: "test-workspace-agent-starting",
+  name: "a-starting-workspace-agent",
+  lifecycle_state: "starting",
+}
+
+export const MockWorkspaceAgentStartTimeout: TypesGen.WorkspaceAgent = {
+  ...MockWorkspaceAgent,
+  id: "test-workspace-agent-start-timeout",
+  name: "a-workspace-agent-timed-out-while-running-startup-script",
+  lifecycle_state: "start_timeout",
+}
+
+export const MockWorkspaceAgentStartError: TypesGen.WorkspaceAgent = {
+  ...MockWorkspaceAgent,
+  id: "test-workspace-agent-start-error",
+  name: "a-workspace-agent-errored-while-running-startup-script",
+  lifecycle_state: "start_error",
 }
 
 export const MockWorkspaceResource: TypesGen.WorkspaceResource = {
@@ -307,10 +471,8 @@ export const MockWorkspaceResource: TypesGen.WorkspaceResource = {
   workspace_transition: "start",
   hide: false,
   icon: "",
-  metadata: [
-    { key: "type", value: "a-workspace-resource", sensitive: false },
-    { key: "api_key", value: "12345678", sensitive: true },
-  ],
+  metadata: [{ key: "api_key", value: "12345678", sensitive: true }],
+  daily_cost: 10,
 }
 
 export const MockWorkspaceResource2: TypesGen.WorkspaceResource = {
@@ -327,10 +489,8 @@ export const MockWorkspaceResource2: TypesGen.WorkspaceResource = {
   workspace_transition: "start",
   hide: false,
   icon: "",
-  metadata: [
-    { key: "type", value: "google_compute_disk", sensitive: false },
-    { key: "size", value: "32GB", sensitive: false },
-  ],
+  metadata: [{ key: "size", value: "32GB", sensitive: false }],
+  daily_cost: 10,
 }
 
 export const MockWorkspaceResource3: TypesGen.WorkspaceResource = {
@@ -347,10 +507,8 @@ export const MockWorkspaceResource3: TypesGen.WorkspaceResource = {
   workspace_transition: "start",
   hide: true,
   icon: "",
-  metadata: [
-    { key: "type", value: "google_compute_disk", sensitive: false },
-    { key: "size", value: "32GB", sensitive: false },
-  ],
+  metadata: [{ key: "size", value: "32GB", sensitive: false }],
+  daily_cost: 20,
 }
 
 export const MockWorkspaceAutostartDisabled: TypesGen.UpdateWorkspaceAutostartRequest =
@@ -372,7 +530,8 @@ export const MockWorkspaceBuild: TypesGen.WorkspaceBuild = {
   initiator_id: MockUser.id,
   initiator_name: MockUser.username,
   job: MockProvisionerJob,
-  template_version_id: "",
+  template_version_id: MockTemplateVersion.id,
+  template_version_name: MockTemplateVersion.name,
   transition: "start",
   updated_at: "2022-05-17T17:39:01.382927298Z",
   workspace_name: "test-workspace",
@@ -383,6 +542,7 @@ export const MockWorkspaceBuild: TypesGen.WorkspaceBuild = {
   reason: "initiator",
   resources: [MockWorkspaceResource],
   status: "running",
+  daily_cost: 20,
 }
 
 export const MockFailedWorkspaceBuild = (
@@ -394,7 +554,8 @@ export const MockFailedWorkspaceBuild = (
   initiator_id: MockUser.id,
   initiator_name: MockUser.username,
   job: MockFailedProvisionerJob,
-  template_version_id: "",
+  template_version_id: MockTemplateVersion.id,
+  template_version_name: MockTemplateVersion.name,
   transition: transition,
   updated_at: "2022-05-17T17:39:01.382927298Z",
   workspace_name: "test-workspace",
@@ -405,6 +566,7 @@ export const MockFailedWorkspaceBuild = (
   reason: "initiator",
   resources: [],
   status: "running",
+  daily_cost: 20,
 })
 
 export const MockWorkspaceBuildStop: TypesGen.WorkspaceBuild = {
@@ -433,6 +595,9 @@ export const MockWorkspace: TypesGen.Workspace = {
   template_id: MockTemplate.id,
   template_name: MockTemplate.name,
   template_icon: MockTemplate.icon,
+  template_display_name: MockTemplate.display_name,
+  template_allow_user_cancel_workspace_jobs:
+    MockTemplate.allow_user_cancel_workspace_jobs,
   outdated: false,
   owner_id: MockUser.id,
   owner_name: MockUser.username,
@@ -535,11 +700,85 @@ export const MockWorkspacesResponse: TypesGen.WorkspacesResponse = {
   count: 26,
 }
 
+export const MockTemplateVersionParameter1: TypesGen.TemplateVersionParameter =
+  {
+    name: "first_parameter",
+    type: "string",
+    description: "This is first parameter",
+    description_plaintext: "Markdown: This is first parameter",
+    default_value: "abc",
+    mutable: true,
+    icon: "/icon/folder.svg",
+    options: [],
+  }
+
+export const MockTemplateVersionParameter2: TypesGen.TemplateVersionParameter =
+  {
+    name: "second_parameter",
+    type: "number",
+    description: "This is second parameter",
+    description_plaintext: "Markdown: This is second parameter",
+    default_value: "2",
+    mutable: true,
+    icon: "/icon/folder.svg",
+    options: [],
+    validation_min: 1,
+    validation_max: 3,
+    validation_monotonic: "increasing",
+  }
+
+export const MockTemplateVersionParameter3: TypesGen.TemplateVersionParameter =
+  {
+    name: "third_parameter",
+    type: "string",
+    description: "This is third parameter",
+    description_plaintext: "Markdown: This is third parameter",
+    default_value: "aaa",
+    mutable: true,
+    icon: "/icon/database.svg",
+    options: [],
+    validation_error: "No way!",
+    validation_regex: "^[a-z]{3}$",
+  }
+
+export const MockTemplateVersionParameter4: TypesGen.TemplateVersionParameter =
+  {
+    name: "fourth_parameter",
+    type: "string",
+    description: "This is fourth parameter",
+    description_plaintext: "Markdown: This is fourth parameter",
+    default_value: "def",
+    mutable: false,
+    icon: "/icon/database.svg",
+    options: [],
+  }
+
+export const MockTemplateVersionParameter5: TypesGen.TemplateVersionParameter =
+  {
+    name: "fifth_parameter",
+    type: "number",
+    description: "This is fifth parameter",
+    description_plaintext: "Markdown: This is fifth parameter",
+    default_value: "5",
+    mutable: true,
+    icon: "/icon/folder.svg",
+    options: [],
+    validation_min: 1,
+    validation_max: 10,
+    validation_monotonic: "decreasing",
+  }
+
 // requests the MockWorkspace
 export const MockWorkspaceRequest: TypesGen.CreateWorkspaceRequest = {
   name: "test",
   parameter_values: [],
   template_id: "test-template",
+  rich_parameter_values: [
+    {
+      name: MockTemplateVersionParameter1.name,
+      value: MockTemplateVersionParameter1.default_value,
+    },
+  ],
 }
 
 export const MockUserAgent: Types.UserAgent = {
@@ -550,9 +789,9 @@ export const MockUserAgent: Types.UserAgent = {
 }
 
 export const MockAuthMethods: TypesGen.AuthMethods = {
-  password: true,
-  github: false,
-  oidc: false,
+  password: { enabled: true },
+  github: { enabled: false },
+  oidc: { enabled: false, signInText: "", iconUrl: "" },
 }
 
 export const MockGitSSHKey: TypesGen.GitSSHKey = {
@@ -878,8 +1117,9 @@ export const MockEntitlements: TypesGen.Entitlements = {
   errors: [],
   warnings: [],
   has_license: false,
-  features: {},
+  features: withDefaultFeatures({}),
   experimental: false,
+  require_telemetry: false,
   trial: false,
 }
 
@@ -889,7 +1129,8 @@ export const MockEntitlementsWithWarnings: TypesGen.Entitlements = {
   has_license: true,
   experimental: false,
   trial: false,
-  features: {
+  require_telemetry: false,
+  features: withDefaultFeatures({
     user_limit: {
       enabled: true,
       entitlement: "grace_period",
@@ -904,7 +1145,7 @@ export const MockEntitlementsWithWarnings: TypesGen.Entitlements = {
       enabled: true,
       entitlement: "entitled",
     },
-  },
+  }),
 }
 
 export const MockEntitlementsWithAuditLog: TypesGen.Entitlements = {
@@ -912,14 +1153,17 @@ export const MockEntitlementsWithAuditLog: TypesGen.Entitlements = {
   warnings: [],
   has_license: true,
   experimental: false,
+  require_telemetry: false,
   trial: false,
-  features: {
+  features: withDefaultFeatures({
     audit_log: {
       enabled: true,
       entitlement: "entitled",
     },
-  },
+  }),
 }
+
+export const MockExperiments: TypesGen.Experiment[] = []
 
 export const MockAuditLog: TypesGen.AuditLog = {
   id: "fbd2116a-8961-4954-87ae-e4575bd29ce0",
@@ -943,14 +1187,18 @@ export const MockAuditLog: TypesGen.AuditLog = {
   },
   status_code: 200,
   additional_fields: {},
-  description: "{user} updated workspace {target}",
+  description: "{user} created workspace {target}",
   user: MockUser,
+  resource_link: "/@admin/bruno-dev",
+  is_deleted: false,
 }
 
 export const MockAuditLog2: TypesGen.AuditLog = {
   ...MockAuditLog,
   id: "53bded77-7b9d-4e82-8771-991a34d759f9",
   action: "write",
+  time: "2022-05-20T16:45:57.122Z",
+  description: "{user} updated workspace {target}",
   diff: {
     workspace_name: {
       old: "old-workspace-name",
@@ -975,21 +1223,69 @@ export const MockAuditLog2: TypesGen.AuditLog = {
   },
 }
 
+export const MockWorkspaceCreateAuditLogForDifferentOwner = {
+  ...MockAuditLog,
+  additional_fields: {
+    workspace_owner: "Member",
+  },
+}
+
 export const MockAuditLogWithWorkspaceBuild: TypesGen.AuditLog = {
   ...MockAuditLog,
   id: "f90995bf-4a2b-4089-b597-e66e025e523e",
   request_id: "61555889-2875-475c-8494-f7693dd5d75b",
   action: "stop",
   resource_type: "workspace_build",
-  description: "{user} stopped workspace build for {target}",
+  description: "{user} stopped build for workspace {target}",
   additional_fields: {
-    workspaceName: "test2",
+    workspace_name: "test2",
   },
 }
 
+export const MockAuditLogWithDeletedResource: TypesGen.AuditLog = {
+  ...MockAuditLog,
+  is_deleted: true,
+}
+
+export const MockAuditLogGitSSH: TypesGen.AuditLog = {
+  ...MockAuditLog,
+  diff: {
+    private_key: {
+      old: "",
+      new: "",
+      secret: true,
+    },
+    public_key: {
+      old: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINRUPjBSNtOAnL22+r07OSu9t3Lnm8/5OX8bRHECKS9g\n",
+      new: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEwoUPJPMekuSzMZyV0rA82TGGNzw/Uj/dhLbwiczTpV\n",
+      secret: false,
+    },
+  },
+}
+
+export const MockAuditLogSuccessfulLogin: TypesGen.AuditLog = {
+  ...MockAuditLog,
+  resource_type: "api_key",
+  resource_target: "",
+  action: "login",
+  status_code: 201,
+  description: "{user} logged in",
+}
+
+export const MockAuditLogUnsuccessfulLoginKnownUser: TypesGen.AuditLog = {
+  ...MockAuditLogSuccessfulLogin,
+  status_code: 401,
+}
+
+export const MockAuditLogUnsuccessfulLoginUnknownUser: TypesGen.AuditLog = {
+  ...MockAuditLogSuccessfulLogin,
+  status_code: 401,
+  user: undefined,
+}
+
 export const MockWorkspaceQuota: TypesGen.WorkspaceQuota = {
-  user_workspace_count: 0,
-  user_workspace_limit: 100,
+  credits_consumed: 0,
+  budget: 100,
 }
 
 export const MockGroup: TypesGen.Group = {
@@ -998,6 +1294,7 @@ export const MockGroup: TypesGen.Group = {
   avatar_url: "https://example.com",
   organization_id: MockOrganization.id,
   members: [MockUser, MockUser2],
+  quota_allowance: 5,
 }
 
 export const MockTemplateACL: TypesGen.TemplateACL = {
@@ -1011,4 +1308,85 @@ export const MockTemplateACL: TypesGen.TemplateACL = {
 export const MockTemplateACLEmpty: TypesGen.TemplateACL = {
   group: [],
   users: [],
+}
+
+export const MockTemplateExample: TypesGen.TemplateExample = {
+  id: "aws-windows",
+  url: "https://github.com/coder/coder/tree/main/examples/templates/aws-windows",
+  name: "Develop in an ECS-hosted container",
+  description: "Get started with Linux development on AWS ECS.",
+  markdown:
+    "\n# aws-ecs\n\nThis is a sample template for running a Coder workspace on ECS. It assumes there\nis a pre-existing ECS cluster with EC2-based compute to host the workspace.\n\n## Architecture\n\nThis workspace is built using the following AWS resources:\n\n- Task definition - the container definition, includes the image, command, volume(s)\n- ECS service - manages the task definition\n\n## code-server\n\n`code-server` is installed via the `startup_script` argument in the `coder_agent`\nresource block. The `coder_app` resource is defined to access `code-server` through\nthe dashboard UI over `localhost:13337`.\n",
+  icon: "/icon/aws.png",
+  tags: ["aws", "cloud"],
+}
+
+export const MockTemplateExample2: TypesGen.TemplateExample = {
+  id: "aws-linux",
+  url: "https://github.com/coder/coder/tree/main/examples/templates/aws-linux",
+  name: "Develop in Linux on AWS EC2",
+  description: "Get started with Linux development on AWS EC2.",
+  markdown:
+    '\n# aws-linux\n\nTo get started, run `coder templates init`. When prompted, select this template.\nFollow the on-screen instructions to proceed.\n\n## Authentication\n\nThis template assumes that coderd is run in an environment that is authenticated\nwith AWS. For example, run `aws configure import` to import credentials on the\nsystem and user running coderd.  For other ways to authenticate [consult the\nTerraform docs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs#authentication-and-configuration).\n\n## Required permissions / policy\n\nThe following sample policy allows Coder to create EC2 instances and modify\ninstances provisioned by Coder:\n\n```json\n{\n    "Version": "2012-10-17",\n    "Statement": [\n        {\n            "Sid": "VisualEditor0",\n            "Effect": "Allow",\n            "Action": [\n                "ec2:GetDefaultCreditSpecification",\n                "ec2:DescribeIamInstanceProfileAssociations",\n                "ec2:DescribeTags",\n                "ec2:CreateTags",\n                "ec2:RunInstances",\n                "ec2:DescribeInstanceCreditSpecifications",\n                "ec2:DescribeImages",\n                "ec2:ModifyDefaultCreditSpecification",\n                "ec2:DescribeVolumes"\n            ],\n            "Resource": "*"\n        },\n        {\n            "Sid": "CoderResources",\n            "Effect": "Allow",\n            "Action": [\n                "ec2:DescribeInstances",\n                "ec2:DescribeInstanceAttribute",\n                "ec2:UnmonitorInstances",\n                "ec2:TerminateInstances",\n                "ec2:StartInstances",\n                "ec2:StopInstances",\n                "ec2:DeleteTags",\n                "ec2:MonitorInstances",\n                "ec2:CreateTags",\n                "ec2:RunInstances",\n                "ec2:ModifyInstanceAttribute",\n                "ec2:ModifyInstanceCreditSpecification"\n            ],\n            "Resource": "arn:aws:ec2:*:*:instance/*",\n            "Condition": {\n                "StringEquals": {\n                    "aws:ResourceTag/Coder_Provisioned": "true"\n                }\n            }\n        }\n    ]\n}\n```\n\n## code-server\n\n`code-server` is installed via the `startup_script` argument in the `coder_agent`\nresource block. The `coder_app` resource is defined to access `code-server` through\nthe dashboard UI over `localhost:13337`.\n',
+  icon: "/icon/aws.png",
+  tags: ["aws", "cloud"],
+}
+
+export const MockPermissions: Permissions = {
+  createGroup: true,
+  createTemplates: true,
+  createUser: true,
+  deleteTemplates: true,
+  readAllUsers: true,
+  updateUsers: true,
+  viewAuditLog: true,
+  viewDeploymentConfig: true,
+  viewUpdateCheck: true,
+}
+
+export const MockAppearance: TypesGen.AppearanceConfig = {
+  logo_url: "",
+  service_banner: {
+    enabled: false,
+  },
+}
+
+export const MockWorkspaceBuildParameter1: TypesGen.WorkspaceBuildParameter = {
+  name: MockTemplateVersionParameter1.name,
+  value: "mock-abc",
+}
+
+export const MockWorkspaceBuildParameter2: TypesGen.WorkspaceBuildParameter = {
+  name: MockTemplateVersionParameter2.name,
+  value: "3",
+}
+
+export const MockWorkspaceBuildParameter5: TypesGen.WorkspaceBuildParameter = {
+  name: MockTemplateVersionParameter5.name,
+  value: "5",
+}
+
+export const mockParameterSchema = (
+  partial: Partial<TypesGen.ParameterSchema>,
+): TypesGen.ParameterSchema => {
+  return {
+    id: "000000",
+    job_id: "000000",
+    allow_override_destination: false,
+    allow_override_source: true,
+    created_at: "",
+    default_destination_scheme: "none",
+    default_refresh: "",
+    default_source_scheme: "data",
+    default_source_value: "default-value",
+    name: "parameter name",
+    description: "Some description!",
+    redisplay_value: false,
+    validation_condition: "",
+    validation_contains: [],
+    validation_error: "",
+    validation_type_system: "",
+    validation_value_type: "",
+    ...partial,
+  }
 }

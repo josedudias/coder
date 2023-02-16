@@ -6,14 +6,15 @@ This article walks you through the user roles available in Coder and creating an
 
 Coder offers these user roles in the community edition:
 
-|                                            | User Admin | Template Admin | Owner |
-| ------------------------------------------ | ---------- | -------------- | ----- |
-| Add and remove Users                       | ✅         |                | ✅    |
-| Manage groups (enterprise)                 | ✅         |                | ✅    |
-| Change User roles                          |            |                | ✅    |
-| Manage **ALL** Templates                   |            | ✅             | ✅    |
-| View, update and delete **ALL** Workspaces |            | ✅             | ✅    |
-| Execute and use **ALL** Workspaces         |            |                | ✅    |
+|                                                       | Auditor | User Admin | Template Admin | Owner |
+| ----------------------------------------------------- | ------- | ---------- | -------------- | ----- |
+| Add and remove Users                                  |         | ✅         |                | ✅    |
+| Manage groups (enterprise)                            |         | ✅         |                | ✅    |
+| Change User roles                                     |         |            |                | ✅    |
+| Manage **ALL** Templates                              |         |            | ✅             | ✅    |
+| View, update and delete **ALL** Workspaces            |         |            | ✅             | ✅    |
+| Execute and use **ALL** Workspaces                    |         |            |                | ✅    |
+| View all user operation [Audit Logs](./audit-logs.md) | ✅      |            |                | ✅    |
 
 A user may have one or more roles. All users have an implicit Member role
 that may use personal workspaces.
@@ -45,7 +46,7 @@ with the user so that they can log into Coder:
 
 ```console
 Download the Coder command line for your operating system:
-https://github.com/coder/coder/releases
+https://github.com/coder/coder/releases/latest
 
 Run  coder login https://<accessURL>.coder.app  to authenticate.
 

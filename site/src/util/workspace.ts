@@ -11,7 +11,7 @@ dayjs.extend(duration)
 dayjs.extend(utc)
 dayjs.extend(minMax)
 
-export const DisplayWorkspaceBuildStatusLanguage = {
+const DisplayWorkspaceBuildStatusLanguage = {
   succeeded: "Succeeded",
   pending: "Pending",
   running: "Running",
@@ -20,7 +20,7 @@ export const DisplayWorkspaceBuildStatusLanguage = {
   failed: "Failed",
 }
 
-export const DisplayAgentVersionLanguage = {
+const DisplayAgentVersionLanguage = {
   unknown: "Unknown",
 }
 
@@ -84,7 +84,7 @@ export const getDisplayWorkspaceBuildInitiatedBy = (
   }
 }
 
-export const getWorkspaceBuildDurationInSeconds = (
+const getWorkspaceBuildDurationInSeconds = (
   build: TypesGen.WorkspaceBuild,
 ): number | undefined => {
   const isCompleted = build.job.started_at && build.job.completed_at
@@ -181,4 +181,12 @@ export const getFaviconByStatus = (
     case "pending":
       return "favicon"
   }
+}
+
+export const getDisplayWorkspaceTemplateName = (
+  workspace: TypesGen.Workspace,
+): string => {
+  return workspace.template_display_name.length > 0
+    ? workspace.template_display_name
+    : workspace.template_name
 }

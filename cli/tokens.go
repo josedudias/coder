@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/xerrors"
 
+	"github.com/coder/coder/cli/cliflag"
 	"github.com/coder/coder/cli/cliui"
 	"github.com/coder/coder/codersdk"
 )
@@ -46,6 +47,9 @@ func tokens() *cobra.Command {
 }
 
 func createToken() *cobra.Command {
+	var (
+		tokenLifetime time.Duration
+	)
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a tokens",
@@ -55,7 +59,9 @@ func createToken() *cobra.Command {
 				return xerrors.Errorf("create codersdk client: %w", err)
 			}
 
-			res, err := client.CreateToken(cmd.Context(), codersdk.Me, codersdk.CreateTokenRequest{})
+			res, err := client.CreateToken(cmd.Context(), codersdk.Me, codersdk.CreateTokenRequest{
+				Lifetime: tokenLifetime,
+			})
 			if err != nil {
 				return xerrors.Errorf("create tokens: %w", err)
 			}
@@ -67,24 +73,24 @@ func createToken() *cobra.Command {
 			cmd.Println(cliui.Styles.Code.Render(strings.TrimSpace(res.Key)))
 			cmd.Println()
 			cmd.Println(cliui.Styles.Wrap.Render(
-				fmt.Sprintf("You can use this token by setting the --%s CLI flag, the %s environment variable, or the %q HTTP header.", varToken, envSessionToken, codersdk.SessionCustomHeader),
+				fmt.Sprintf("You can use this token by setting the --%s CLI flag, the %s environment variable, or the %q HTTP header.", varToken, envSessionToken, codersdk.SessionTokenHeader),
 			))
 
 			return nil
 		},
 	}
 
+	cliflag.DurationVarP(cmd.Flags(), &tokenLifetime, "lifetime", "", "CODER_TOKEN_LIFETIME", 30*24*time.Hour, "Specify a duration for the lifetime of the token.")
+
 	return cmd
 }
 
-type tokenRow struct {
-	ID        string    `table:"ID"`
-	LastUsed  time.Time `table:"Last Used"`
-	ExpiresAt time.Time `table:"Expires At"`
-	CreatedAt time.Time `table:"Created At"`
-}
-
 func listTokens() *cobra.Command {
+	formatter := cliui.NewOutputFormatter(
+		cliui.TableFormat([]codersdk.APIKey{}, nil),
+		cliui.JSONFormat(),
+	)
+
 	cmd := &cobra.Command{
 		Use:     "list",
 		Aliases: []string{"ls"},
@@ -95,7 +101,7 @@ func listTokens() *cobra.Command {
 				return xerrors.Errorf("create codersdk client: %w", err)
 			}
 
-			keys, err := client.GetTokens(cmd.Context(), codersdk.Me)
+			keys, err := client.Tokens(cmd.Context(), codersdk.Me)
 			if err != nil {
 				return xerrors.Errorf("create tokens: %w", err)
 			}
@@ -106,17 +112,7 @@ func listTokens() *cobra.Command {
 				))
 			}
 
-			var rows []tokenRow
-			for _, key := range keys {
-				rows = append(rows, tokenRow{
-					ID:        key.ID,
-					LastUsed:  key.LastUsed,
-					ExpiresAt: key.ExpiresAt,
-					CreatedAt: key.CreatedAt,
-				})
-			}
-
-			out, err := cliui.DisplayTable(rows, "", nil)
+			out, err := formatter.Format(cmd.Context(), keys)
 			if err != nil {
 				return err
 			}
@@ -126,6 +122,7 @@ func listTokens() *cobra.Command {
 		},
 	}
 
+	formatter.AttachFlags(cmd)
 	return cmd
 }
 

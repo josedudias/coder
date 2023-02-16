@@ -1,7 +1,6 @@
 import Collapse from "@material-ui/core/Collapse"
 import { makeStyles } from "@material-ui/core/styles"
 import TableCell from "@material-ui/core/TableCell"
-import TableRow from "@material-ui/core/TableRow"
 import { AuditLog } from "api/typesGenerated"
 import {
   CloseDropdown,
@@ -9,27 +8,21 @@ import {
 } from "components/DropdownArrows/DropdownArrows"
 import { Pill } from "components/Pill/Pill"
 import { Stack } from "components/Stack/Stack"
+import { TimelineEntry } from "components/Timeline/TimelineEntry"
 import { UserAvatar } from "components/UserAvatar/UserAvatar"
 import { useState } from "react"
 import { PaletteIndex } from "theme/palettes"
 import userAgentParser from "ua-parser-js"
-import { combineClasses } from "util/combineClasses"
-import { AuditLogDiff } from "./AuditLogDiff"
-
-export const readableActionMessage = (auditLog: AuditLog): string => {
-  let target = auditLog.resource_target.trim()
-
-  // audit logs with a resource_type of workspace build use workspace name as a target
-  if (auditLog.resource_type === "workspace_build") {
-    target = auditLog.additional_fields.workspaceName.trim()
-  }
-
-  return auditLog.description
-    .replace("{user}", `<strong>${auditLog.user?.username.trim()}</strong>`)
-    .replace("{target}", `<strong>${target}</strong>`)
-}
+import { AuditLogDiff, determineGroupDiff } from "./AuditLogDiff"
+import { useTranslation } from "react-i18next"
+import { AuditLogDescription } from "./AuditLogDescription"
 
 const httpStatusColor = (httpStatus: number): PaletteIndex => {
+  // redirects are successful
+  if (httpStatus === 307) {
+    return "success"
+  }
+
   if (httpStatus >= 300 && httpStatus < 500) {
     return "warning"
   }
@@ -52,14 +45,18 @@ export const AuditLogRow: React.FC<AuditLogRowProps> = ({
   defaultIsDiffOpen = false,
 }) => {
   const styles = useStyles()
+  const { t } = useTranslation("auditLog")
   const [isDiffOpen, setIsDiffOpen] = useState(defaultIsDiffOpen)
   const diffs = Object.entries(auditLog.diff)
   const shouldDisplayDiff = diffs.length > 0
   const { os, browser } = userAgentParser(auditLog.user_agent)
-  const notAvailableLabel = "Not available"
-  const displayBrowserInfo = browser.name
-    ? `${browser.name} ${browser.version}`
-    : notAvailableLabel
+
+  let auditDiff = auditLog.diff
+
+  // groups have nested diffs (group members)
+  if (auditLog.resource_type === "group") {
+    auditDiff = determineGroupDiff(auditLog.diff)
+  }
 
   const toggle = () => {
     if (shouldDisplayDiff) {
@@ -68,19 +65,16 @@ export const AuditLogRow: React.FC<AuditLogRowProps> = ({
   }
 
   return (
-    <TableRow
+    <TimelineEntry
       key={auditLog.id}
       data-testid={`audit-log-row-${auditLog.id}`}
-      className={styles.auditLogRow}
+      clickable={shouldDisplayDiff}
     >
       <TableCell className={styles.auditLogCell}>
         <Stack
           direction="row"
           alignItems="center"
-          className={combineClasses({
-            [styles.auditLogHeader]: true,
-            [styles.clickable]: shouldDisplayDiff,
-          })}
+          className={styles.auditLogHeader}
           tabIndex={0}
           onClick={toggle}
           onKeyDown={(event) => {
@@ -100,7 +94,7 @@ export const AuditLogRow: React.FC<AuditLogRowProps> = ({
               className={styles.fullWidth}
             >
               <UserAvatar
-                username={auditLog.user?.username ?? ""}
+                username={auditLog.user?.username ?? "?"}
                 avatarURL={auditLog.user?.avatar_url}
               />
 
@@ -116,11 +110,12 @@ export const AuditLogRow: React.FC<AuditLogRowProps> = ({
                   alignItems="baseline"
                   spacing={1}
                 >
-                  <span
-                    dangerouslySetInnerHTML={{
-                      __html: readableActionMessage(auditLog),
-                    }}
-                  />
+                  <AuditLogDescription auditLog={auditLog} />
+                  {auditLog.is_deleted && (
+                    <span className={styles.deletedLabel}>
+                      <>{t("table.logRow.deletedLabel")}</>
+                    </span>
+                  )}
                   <span className={styles.auditLogTime}>
                     {new Date(auditLog.time).toLocaleTimeString()}
                   </span>
@@ -128,17 +123,26 @@ export const AuditLogRow: React.FC<AuditLogRowProps> = ({
 
                 <Stack direction="row" alignItems="center">
                   <Stack direction="row" spacing={1} alignItems="baseline">
-                    <span className={styles.auditLogInfo}>
-                      IP: <strong>{auditLog.ip ?? notAvailableLabel}</strong>
-                    </span>
-
-                    <span className={styles.auditLogInfo}>
-                      OS: <strong>{os.name ?? notAvailableLabel}</strong>
-                    </span>
-
-                    <span className={styles.auditLogInfo}>
-                      Browser: <strong>{displayBrowserInfo}</strong>
-                    </span>
+                    {auditLog.ip && (
+                      <span className={styles.auditLogInfo}>
+                        <>{t("table.logRow.ip")}</>
+                        <strong>{auditLog.ip}</strong>
+                      </span>
+                    )}
+                    {os.name && (
+                      <span className={styles.auditLogInfo}>
+                        <>{t("table.logRow.os")}</>
+                        <strong>{os.name}</strong>
+                      </span>
+                    )}
+                    {browser.name && (
+                      <span className={styles.auditLogInfo}>
+                        <>{t("table.logRow.browser")}</>
+                        <strong>
+                          {browser.name} {browser.version}
+                        </strong>
+                      </span>
+                    )}
                   </Stack>
 
                   <Pill
@@ -160,11 +164,11 @@ export const AuditLogRow: React.FC<AuditLogRowProps> = ({
 
         {shouldDisplayDiff && (
           <Collapse in={isDiffOpen}>
-            <AuditLogDiff diff={auditLog.diff} />
+            <AuditLogDiff diff={auditDiff} />
           </Collapse>
         )}
       </TableCell>
-    </TableRow>
+    </TimelineEntry>
   )
 }
 
@@ -174,38 +178,8 @@ const useStyles = makeStyles((theme) => ({
     border: 0,
   },
 
-  auditLogRow: {
-    position: "relative",
-
-    "&:focus": {
-      outlineStyle: "solid",
-      outlineOffset: -1,
-      outlineWidth: 2,
-      outlineColor: theme.palette.secondary.dark,
-    },
-
-    "&:not(:last-child) td:before": {
-      position: "absolute",
-      top: 20,
-      left: 50,
-      display: "block",
-      content: "''",
-      height: "100%",
-      width: 2,
-      background: theme.palette.divider,
-    },
-  },
-
   auditLogHeader: {
     padding: theme.spacing(2, 4),
-  },
-
-  clickable: {
-    cursor: "pointer",
-
-    "&:hover": {
-      backgroundColor: theme.palette.action.hover,
-    },
   },
 
   auditLogHeaderInfo: {
@@ -245,5 +219,10 @@ const useStyles = makeStyles((theme) => ({
     paddingLeft: 10,
     paddingRight: 10,
     fontWeight: 600,
+  },
+
+  deletedLabel: {
+    ...theme.typography.caption,
+    color: theme.palette.text.secondary,
   },
 }))

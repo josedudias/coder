@@ -14,6 +14,7 @@ import (
 
 	"cdr.dev/slog"
 	"github.com/coder/coder/coderd/database"
+	"github.com/coder/coder/coderd/database/dbauthz"
 	"github.com/coder/coder/codersdk"
 	"github.com/coder/retry"
 )
@@ -27,6 +28,7 @@ type Cache struct {
 	database database.Store
 	log      slog.Logger
 
+	deploymentDAUResponses   atomic.Pointer[codersdk.DeploymentDAUsResponse]
 	templateDAUResponses     atomic.Pointer[map[uuid.UUID]codersdk.TemplateDAUsResponse]
 	templateUniqueUsers      atomic.Pointer[map[uuid.UUID]int]
 	templateAverageBuildTime atomic.Pointer[map[uuid.UUID]database.GetTemplateAverageBuildTimeRow]
@@ -110,6 +112,28 @@ func convertDAUResponse(rows []database.GetTemplateDAUsRow) codersdk.TemplateDAU
 	return resp
 }
 
+func convertDeploymentDAUResponse(rows []database.GetDeploymentDAUsRow) codersdk.DeploymentDAUsResponse {
+	respMap := make(map[time.Time][]uuid.UUID)
+	for _, row := range rows {
+		respMap[row.Date] = append(respMap[row.Date], row.UserID)
+	}
+
+	dates := maps.Keys(respMap)
+	slices.SortFunc(dates, func(a, b time.Time) bool {
+		return a.Before(b)
+	})
+
+	var resp codersdk.DeploymentDAUsResponse
+	for _, date := range fillEmptyDays(dates) {
+		resp.Entries = append(resp.Entries, codersdk.DAUEntry{
+			Date:   date,
+			Amount: len(respMap[date]),
+		})
+	}
+
+	return resp
+}
+
 func countUniqueUsers(rows []database.GetTemplateDAUsRow) int {
 	seen := make(map[uuid.UUID]struct{}, len(rows))
 	for _, row := range rows {
@@ -119,6 +143,8 @@ func countUniqueUsers(rows []database.GetTemplateDAUsRow) int {
 }
 
 func (c *Cache) refresh(ctx context.Context) error {
+	//nolint:gocritic // This is a system service.
+	ctx = dbauthz.AsSystemRestricted(ctx)
 	err := c.database.DeleteOldAgentStats(ctx)
 	if err != nil {
 		return xerrors.Errorf("delete old stats: %w", err)
@@ -130,10 +156,19 @@ func (c *Cache) refresh(ctx context.Context) error {
 	}
 
 	var (
+		deploymentDAUs            = codersdk.DeploymentDAUsResponse{}
 		templateDAUs              = make(map[uuid.UUID]codersdk.TemplateDAUsResponse, len(templates))
 		templateUniqueUsers       = make(map[uuid.UUID]int)
 		templateAverageBuildTimes = make(map[uuid.UUID]database.GetTemplateAverageBuildTimeRow)
 	)
+
+	rows, err := c.database.GetDeploymentDAUs(ctx)
+	if err != nil {
+		return err
+	}
+	deploymentDAUs = convertDeploymentDAUResponse(rows)
+	c.deploymentDAUResponses.Store(&deploymentDAUs)
+
 	for _, template := range templates {
 		rows, err := c.database.GetTemplateDAUs(ctx, template.ID)
 		if err != nil {
@@ -207,6 +242,11 @@ func (c *Cache) Close() error {
 	return nil
 }
 
+func (c *Cache) DeploymentDAUs() (*codersdk.DeploymentDAUsResponse, bool) {
+	m := c.deploymentDAUResponses.Load()
+	return m, m != nil
+}
+
 // TemplateDAUs returns an empty response if the template doesn't have users
 // or is loading for the first time.
 func (c *Cache) TemplateDAUs(id uuid.UUID) (*codersdk.TemplateDAUsResponse, bool) {
@@ -242,7 +282,11 @@ func (c *Cache) TemplateUniqueUsers(id uuid.UUID) (int, bool) {
 }
 
 func (c *Cache) TemplateBuildTimeStats(id uuid.UUID) codersdk.TemplateBuildTimeStats {
-	var unknown codersdk.TemplateBuildTimeStats
+	unknown := codersdk.TemplateBuildTimeStats{
+		codersdk.WorkspaceTransitionStart:  {},
+		codersdk.WorkspaceTransitionStop:   {},
+		codersdk.WorkspaceTransitionDelete: {},
+	}
 
 	m := c.templateAverageBuildTime.Load()
 	if m == nil {
@@ -256,7 +300,7 @@ func (c *Cache) TemplateBuildTimeStats(id uuid.UUID) codersdk.TemplateBuildTimeS
 		return unknown
 	}
 
-	convertMedian := func(m float64) *int64 {
+	convertMillis := func(m float64) *int64 {
 		if m <= 0 {
 			return nil
 		}
@@ -265,8 +309,17 @@ func (c *Cache) TemplateBuildTimeStats(id uuid.UUID) codersdk.TemplateBuildTimeS
 	}
 
 	return codersdk.TemplateBuildTimeStats{
-		StartMillis:  convertMedian(resp.StartMedian),
-		StopMillis:   convertMedian(resp.StopMedian),
-		DeleteMillis: convertMedian(resp.DeleteMedian),
+		codersdk.WorkspaceTransitionStart: {
+			P50: convertMillis(resp.Start50),
+			P95: convertMillis(resp.Start95),
+		},
+		codersdk.WorkspaceTransitionStop: {
+			P50: convertMillis(resp.Stop50),
+			P95: convertMillis(resp.Stop95),
+		},
+		codersdk.WorkspaceTransitionDelete: {
+			P50: convertMillis(resp.Delete50),
+			P95: convertMillis(resp.Delete95),
+		},
 	}
 }

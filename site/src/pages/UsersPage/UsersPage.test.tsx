@@ -6,10 +6,9 @@ import { Language as usersXServiceLanguage } from "xServices/users/usersXService
 import * as API from "../../api/api"
 import { Role } from "../../api/typesGenerated"
 import { Language as ResetPasswordDialogLanguage } from "../../components/Dialogs/ResetPasswordDialog/ResetPasswordDialog"
-import { GlobalSnackbar } from "../../components/GlobalSnackbar/GlobalSnackbar"
-import { Language as RoleSelectLanguage } from "../../components/RoleSelect/RoleSelect"
 import {
   MockAuditorRole,
+  MockOwnerRole,
   MockUser,
   MockUser2,
   renderWithAuth,
@@ -21,12 +20,7 @@ import { Language as UsersPageLanguage, UsersPage } from "./UsersPage"
 const { t } = i18n
 
 const renderPage = () => {
-  return renderWithAuth(
-    <>
-      <UsersPage />
-      <GlobalSnackbar />
-    </>,
-  )
+  return renderWithAuth(<UsersPage />)
 }
 
 const suspendUser = async (setupActionSpies: () => void) => {
@@ -156,32 +150,27 @@ const resetUserPassword = async (setupActionSpies: () => void) => {
 const updateUserRole = async (setupActionSpies: () => void, role: Role) => {
   // Get the first user in the table
   const users = await screen.findAllByText(/.*@coder.com/)
-  const firstUserRow = users[0].closest("tr")
-  if (!firstUserRow) {
+  const userRow = users[0].closest("tr")
+  if (!userRow) {
     throw new Error("Error on get the first user row")
   }
 
-  // Click on the "roles" menu to display the role options
-  const rolesLabel = within(firstUserRow).getByLabelText(
-    RoleSelectLanguage.label,
-  )
-  const rolesMenuTrigger = within(rolesLabel).getByRole("button")
-  // For MUI v4, the Select was changed to open on mouseDown instead of click
-  // https://github.com/mui-org/material-ui/pull/17978
-  fireEvent.mouseDown(rolesMenuTrigger)
+  // Click on the "edit icon" to display the role options
+  const buttonTitle = t("editUserRolesTooltip", { ns: "usersPage" })
+  const editButton = within(userRow).getByTitle(buttonTitle)
+  fireEvent.click(editButton)
 
   // Setup spies to check the actions after
   setupActionSpies()
 
   // Click on the role option
-  const listBox = screen.getByRole("listbox")
-  const auditorOption = within(listBox).getByRole("option", {
-    name: role.display_name,
-  })
+  const fieldsetTitle = t("fieldSetRolesTooltip", { ns: "usersPage" })
+  const fieldset = await screen.findByTitle(fieldsetTitle)
+  const auditorOption = within(fieldset).getByText(role.display_name)
   fireEvent.click(auditorOption)
 
   return {
-    rolesMenuTrigger,
+    userRow,
   }
 }
 
@@ -199,9 +188,10 @@ describe("UsersPage", () => {
 
         await suspendUser(() => {
           jest.spyOn(API, "suspendUser").mockResolvedValueOnce(MockUser)
-          jest
-            .spyOn(API, "getUsers")
-            .mockResolvedValueOnce([SuspendedMockUser, MockUser2])
+          jest.spyOn(API, "getUsers").mockResolvedValueOnce({
+            users: [SuspendedMockUser, MockUser2],
+            count: 2,
+          })
         })
 
         // Check if the success message is displayed
@@ -240,7 +230,7 @@ describe("UsersPage", () => {
 
       const mock = jest
         .spyOn(API, "getUsers")
-        .mockResolvedValueOnce([MockUser, MockUser2])
+        .mockResolvedValueOnce({ users: [MockUser, MockUser2], count: 26 })
 
       const nextButton = await screen.findByLabelText("Next page")
       expect(nextButton).toBeEnabled()
@@ -259,7 +249,7 @@ describe("UsersPage", () => {
         expect(API.getUsers).toBeCalledWith({ offset: 0, limit: 25, q: "" }),
       )
 
-      const pageButtons = await container.querySelectorAll(
+      const pageButtons = container.querySelectorAll(
         `button[name="Page button"]`,
       )
       // count handler says there are 2 pages of results
@@ -274,9 +264,10 @@ describe("UsersPage", () => {
 
         await deleteUser(() => {
           jest.spyOn(API, "deleteUser").mockResolvedValueOnce(undefined)
-          jest
-            .spyOn(API, "getUsers")
-            .mockResolvedValueOnce([MockUser, SuspendedMockUser])
+          jest.spyOn(API, "getUsers").mockResolvedValueOnce({
+            users: [MockUser, SuspendedMockUser],
+            count: 2,
+          })
         })
 
         // Check if the success message is displayed
@@ -320,11 +311,12 @@ describe("UsersPage", () => {
           jest
             .spyOn(API, "activateUser")
             .mockResolvedValueOnce(SuspendedMockUser)
-          jest
-            .spyOn(API, "getUsers")
-            .mockImplementationOnce(() =>
-              Promise.resolve([MockUser, MockUser2, SuspendedMockUser]),
-            )
+          jest.spyOn(API, "getUsers").mockImplementationOnce(() =>
+            Promise.resolve({
+              users: [MockUser, MockUser2, SuspendedMockUser],
+              count: 3,
+            }),
+          )
         })
 
         // Check if the success message is displayed
@@ -399,7 +391,7 @@ describe("UsersPage", () => {
       it("updates the roles", async () => {
         renderPage()
 
-        const { rolesMenuTrigger } = await updateUserRole(() => {
+        const { userRow } = await updateUserRole(() => {
           jest.spyOn(API, "updateUserRoles").mockResolvedValueOnce({
             ...MockUser,
             roles: [...MockUser.roles, MockAuditorRole],
@@ -407,9 +399,10 @@ describe("UsersPage", () => {
         }, MockAuditorRole)
 
         // Check if the select text was updated with the Auditor role
-        await waitFor(() =>
-          expect(rolesMenuTrigger).toHaveTextContent("Owner, Auditor"),
-        )
+        await waitFor(() => {
+          expect(userRow).toHaveTextContent(MockOwnerRole.display_name)
+          expect(userRow).toHaveTextContent(MockAuditorRole.display_name)
+        })
 
         // Check if the API was called correctly
         const currentRoles = MockUser.roles.map((r) => r.name)

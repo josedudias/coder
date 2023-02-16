@@ -4,39 +4,49 @@ import { useTranslation } from "react-i18next"
 import { WorkspaceStatus } from "../../api/typesGenerated"
 import {
   ActionLoadingButton,
+  ChangeVersionButton,
   DeleteButton,
   DisabledButton,
+  BuildParametersButton,
   StartButton,
   StopButton,
   UpdateButton,
 } from "../DropdownButton/ActionCtas"
-import { ButtonMapping, ButtonTypesEnum, statusToAbilities } from "./constants"
+import { ButtonMapping, ButtonTypesEnum, buttonAbilities } from "./constants"
 
 export interface WorkspaceActionsProps {
   workspaceStatus: WorkspaceStatus
+  hasTemplateParameters: boolean
   isOutdated: boolean
   handleStart: () => void
   handleStop: () => void
   handleDelete: () => void
   handleUpdate: () => void
   handleCancel: () => void
+  handleChangeVersion: () => void
+  handleBuildParameters: () => void
   isUpdating: boolean
   children?: ReactNode
 }
 
 export const WorkspaceActions: FC<WorkspaceActionsProps> = ({
   workspaceStatus,
+  hasTemplateParameters,
   isOutdated,
   handleStart,
   handleStop,
   handleDelete,
   handleUpdate,
   handleCancel,
+  handleChangeVersion,
+  handleBuildParameters,
   isUpdating,
 }) => {
   const { t } = useTranslation("workspacePage")
-  const { canCancel, canAcceptJobs, actions } =
-    statusToAbilities[workspaceStatus]
+  const { canCancel, canAcceptJobs, actions } = buttonAbilities(
+    workspaceStatus,
+    hasTemplateParameters,
+  )
   const canBeUpdated = isOutdated && canAcceptJobs
 
   // A mapping of button type to the corresponding React component
@@ -44,6 +54,12 @@ export const WorkspaceActions: FC<WorkspaceActionsProps> = ({
     [ButtonTypesEnum.update]: <UpdateButton handleAction={handleUpdate} />,
     [ButtonTypesEnum.updating]: (
       <ActionLoadingButton label={t("actionButton.updating")} />
+    ),
+    [ButtonTypesEnum.changeVersion]: (
+      <ChangeVersionButton handleAction={handleChangeVersion} />
+    ),
+    [ButtonTypesEnum.buildParameters]: (
+      <BuildParametersButton handleAction={handleBuildParameters} />
     ),
     [ButtonTypesEnum.start]: <StartButton handleAction={handleStart} />,
     [ButtonTypesEnum.starting]: (

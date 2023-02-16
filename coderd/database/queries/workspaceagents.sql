@@ -55,10 +55,13 @@ INSERT INTO
 		instance_metadata,
 		resource_metadata,
 		connection_timeout_seconds,
-		troubleshooting_url
+		troubleshooting_url,
+		motd_file,
+		login_before_ready,
+		startup_script_timeout_seconds
 	)
 VALUES
-	($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING *;
+	($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING *;
 
 -- name: UpdateWorkspaceAgentConnectionByID :exec
 UPDATE
@@ -72,10 +75,19 @@ SET
 WHERE
 	id = $1;
 
--- name: UpdateWorkspaceAgentVersionByID :exec
+-- name: UpdateWorkspaceAgentStartupByID :exec
 UPDATE
 	workspace_agents
 SET
-	version = $2
+	version = $2,
+	expanded_directory = $3
+WHERE
+	id = $1;
+
+-- name: UpdateWorkspaceAgentLifecycleStateByID :exec
+UPDATE
+	workspace_agents
+SET
+	lifecycle_state = $2
 WHERE
 	id = $1;

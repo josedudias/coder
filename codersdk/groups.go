@@ -11,16 +11,18 @@ import (
 )
 
 type CreateGroupRequest struct {
-	Name      string `json:"name"`
-	AvatarURL string `json:"avatar_url"`
+	Name           string `json:"name"`
+	AvatarURL      string `json:"avatar_url"`
+	QuotaAllowance int    `json:"quota_allowance"`
 }
 
 type Group struct {
-	ID             uuid.UUID `json:"id"`
+	ID             uuid.UUID `json:"id" format:"uuid"`
 	Name           string    `json:"name"`
-	OrganizationID uuid.UUID `json:"organization_id"`
+	OrganizationID uuid.UUID `json:"organization_id" format:"uuid"`
 	Members        []User    `json:"members"`
 	AvatarURL      string    `json:"avatar_url"`
+	QuotaAllowance int       `json:"quota_allowance"`
 }
 
 func (c *Client) CreateGroup(ctx context.Context, orgID uuid.UUID, req CreateGroupRequest) (Group, error) {
@@ -34,7 +36,7 @@ func (c *Client) CreateGroup(ctx context.Context, orgID uuid.UUID, req CreateGro
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusCreated {
-		return Group{}, readBodyAsError(res)
+		return Group{}, ReadBodyAsError(res)
 	}
 	var resp Group
 	return resp, json.NewDecoder(res.Body).Decode(&resp)
@@ -51,7 +53,7 @@ func (c *Client) GroupsByOrganization(ctx context.Context, orgID uuid.UUID) ([]G
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return nil, readBodyAsError(res)
+		return nil, ReadBodyAsError(res)
 	}
 
 	var groups []Group
@@ -69,7 +71,7 @@ func (c *Client) GroupByOrgAndName(ctx context.Context, orgID uuid.UUID, name st
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return Group{}, readBodyAsError(res)
+		return Group{}, ReadBodyAsError(res)
 	}
 	var resp Group
 	return resp, json.NewDecoder(res.Body).Decode(&resp)
@@ -86,17 +88,18 @@ func (c *Client) Group(ctx context.Context, group uuid.UUID) (Group, error) {
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return Group{}, readBodyAsError(res)
+		return Group{}, ReadBodyAsError(res)
 	}
 	var resp Group
 	return resp, json.NewDecoder(res.Body).Decode(&resp)
 }
 
 type PatchGroupRequest struct {
-	AddUsers    []string `json:"add_users"`
-	RemoveUsers []string `json:"remove_users"`
-	Name        string   `json:"name"`
-	AvatarURL   *string  `json:"avatar_url"`
+	AddUsers       []string `json:"add_users"`
+	RemoveUsers    []string `json:"remove_users"`
+	Name           string   `json:"name"`
+	AvatarURL      *string  `json:"avatar_url"`
+	QuotaAllowance *int     `json:"quota_allowance"`
 }
 
 func (c *Client) PatchGroup(ctx context.Context, group uuid.UUID, req PatchGroupRequest) (Group, error) {
@@ -110,7 +113,7 @@ func (c *Client) PatchGroup(ctx context.Context, group uuid.UUID, req PatchGroup
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return Group{}, readBodyAsError(res)
+		return Group{}, ReadBodyAsError(res)
 	}
 	var resp Group
 	return resp, json.NewDecoder(res.Body).Decode(&resp)
@@ -127,7 +130,7 @@ func (c *Client) DeleteGroup(ctx context.Context, group uuid.UUID) error {
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return readBodyAsError(res)
+		return ReadBodyAsError(res)
 	}
 	return nil
 }

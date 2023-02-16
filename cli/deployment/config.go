@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/viper"
 	"golang.org/x/xerrors"
 
+	"github.com/coder/coder/buildinfo"
 	"github.com/coder/coder/cli/cliui"
 	"github.com/coder/coder/cli/config"
 	"github.com/coder/coder/codersdk"
@@ -31,12 +32,27 @@ func newConfig() *codersdk.DeploymentConfig {
 			Usage: "Specifies the wildcard hostname to use for workspace applications in the form \"*.example.com\".",
 			Flag:  "wildcard-access-url",
 		},
+		RedirectToAccessURL: &codersdk.DeploymentConfigField[bool]{
+			Name:  "Redirect to Access URL",
+			Usage: "Specifies whether to redirect requests that do not match the access URL host.",
+			Flag:  "redirect-to-access-url",
+		},
+		// DEPRECATED: Use HTTPAddress or TLS.Address instead.
 		Address: &codersdk.DeploymentConfigField[string]{
 			Name:      "Address",
 			Usage:     "Bind address of the server.",
 			Flag:      "address",
 			Shorthand: "a",
-			Default:   "127.0.0.1:3000",
+			// Deprecated, so we don't have a default. If set, it will overwrite
+			// HTTPAddress and TLS.Address and print a warning.
+			Hidden:  true,
+			Default: "",
+		},
+		HTTPAddress: &codersdk.DeploymentConfigField[string]{
+			Name:    "Address",
+			Usage:   "HTTP bind address of the server. Unset to disable the HTTP endpoint.",
+			Flag:    "http-address",
+			Default: "127.0.0.1:3000",
 		},
 		AutobuildPollInterval: &codersdk.DeploymentConfigField[time.Duration]{
 			Name:    "Autobuild Poll Interval",
@@ -143,7 +159,7 @@ func newConfig() *codersdk.DeploymentConfig {
 			Name:    "Cache Directory",
 			Usage:   "The directory to cache temporary files. If unspecified and $CACHE_DIRECTORY is set, it will be used for compatibility with systemd.",
 			Flag:    "cache-dir",
-			Default: defaultCacheDir(),
+			Default: DefaultCacheDir(),
 		},
 		InMemoryDatabase: &codersdk.DeploymentConfigField[bool]{
 			Name:   "In Memory Database",
@@ -185,6 +201,11 @@ func newConfig() *codersdk.DeploymentConfig {
 					Usage: "Whether new users can sign up with GitHub.",
 					Flag:  "oauth2-github-allow-signups",
 				},
+				AllowEveryone: &codersdk.DeploymentConfigField[bool]{
+					Name:  "OAuth2 GitHub Allow Everyone",
+					Usage: "Allow all logins, setting this option means allowed orgs and teams must be empty.",
+					Flag:  "oauth2-github-allow-everyone",
+				},
 				EnterpriseBaseURL: &codersdk.DeploymentConfigField[string]{
 					Name:  "OAuth2 GitHub Enterprise Base URL",
 					Usage: "Base URL of a GitHub Enterprise deployment to use for Login with GitHub.",
@@ -210,9 +231,9 @@ func newConfig() *codersdk.DeploymentConfig {
 				Flag:   "oidc-client-secret",
 				Secret: true,
 			},
-			EmailDomain: &codersdk.DeploymentConfigField[string]{
+			EmailDomain: &codersdk.DeploymentConfigField[[]string]{
 				Name:  "OIDC Email Domain",
-				Usage: "Email domain that clients logging in with OIDC must match.",
+				Usage: "Email domains that clients logging in with OIDC must match.",
 				Flag:  "oidc-email-domain",
 			},
 			IssuerURL: &codersdk.DeploymentConfigField[string]{
@@ -225,6 +246,29 @@ func newConfig() *codersdk.DeploymentConfig {
 				Usage:   "Scopes to grant when authenticating with OIDC.",
 				Flag:    "oidc-scopes",
 				Default: []string{oidc.ScopeOpenID, "profile", "email"},
+			},
+			IgnoreEmailVerified: &codersdk.DeploymentConfigField[bool]{
+				Name:    "OIDC Ignore Email Verified",
+				Usage:   "Ignore the email_verified claim from the upstream provider.",
+				Flag:    "oidc-ignore-email-verified",
+				Default: false,
+			},
+			UsernameField: &codersdk.DeploymentConfigField[string]{
+				Name:    "OIDC Username Field",
+				Usage:   "OIDC claim field to use as the username.",
+				Flag:    "oidc-username-field",
+				Default: "preferred_username",
+			},
+			SignInText: &codersdk.DeploymentConfigField[string]{
+				Name:    "OpenID Connect sign in text",
+				Usage:   "The text to show on the OpenID Connect sign in button",
+				Flag:    "oidc-sign-in-text",
+				Default: "OpenID Connect",
+			},
+			IconURL: &codersdk.DeploymentConfigField[string]{
+				Name:  "OpenID connect icon URL",
+				Usage: "URL pointing to the icon to use on the OepnID Connect login button",
+				Flag:  "oidc-icon-url",
 			},
 		},
 
@@ -255,6 +299,20 @@ func newConfig() *codersdk.DeploymentConfig {
 				Usage: "Whether TLS will be enabled.",
 				Flag:  "tls-enable",
 			},
+			Address: &codersdk.DeploymentConfigField[string]{
+				Name:    "TLS Address",
+				Usage:   "HTTPS bind address of the server.",
+				Flag:    "tls-address",
+				Default: "127.0.0.1:3443",
+			},
+			// DEPRECATED: Use RedirectToAccessURL instead.
+			RedirectHTTP: &codersdk.DeploymentConfigField[bool]{
+				Name:    "Redirect HTTP to HTTPS",
+				Usage:   "Whether HTTP requests will be redirected to the access URL (if it's a https URL and TLS is enabled). Requests to local IP addresses are never redirected regardless of this setting.",
+				Flag:    "tls-redirect-http-to-https",
+				Default: true,
+				Hidden:  true,
+			},
 			CertFiles: &codersdk.DeploymentConfigField[[]string]{
 				Name:  "TLS Certificate Files",
 				Usage: "Path to each certificate for TLS. It requires a PEM-encoded file. To configure the listener to use a CA certificate, concatenate the primary certificate and the CA certificate together. The primary certificate should appear first in the combined file.",
@@ -269,7 +327,7 @@ func newConfig() *codersdk.DeploymentConfig {
 				Name:    "TLS Client Auth",
 				Usage:   "Policy the server will follow for TLS Client Authentication. Accepted values are \"none\", \"request\", \"require-any\", \"verify-if-given\", or \"require-and-verify\".",
 				Flag:    "tls-client-auth",
-				Default: "request",
+				Default: "none",
 			},
 			KeyFiles: &codersdk.DeploymentConfigField[[]string]{
 				Name:  "TLS Key Files",
@@ -316,17 +374,25 @@ func newConfig() *codersdk.DeploymentConfig {
 			Usage: "Controls if the 'Secure' property is set on browser session cookies.",
 			Flag:  "secure-auth-cookie",
 		},
+		StrictTransportSecurity: &codersdk.DeploymentConfigField[int]{
+			Name: "Strict-Transport-Security",
+			Usage: "Controls if the 'Strict-Transport-Security' header is set on all static file responses. " +
+				"This header should only be set if the server is accessed via HTTPS. This value is the MaxAge in seconds of " +
+				"the header.",
+			Default: 0,
+			Flag:    "strict-transport-security",
+		},
+		StrictTransportSecurityOptions: &codersdk.DeploymentConfigField[[]string]{
+			Name: "Strict-Transport-Security Options",
+			Usage: "Two optional fields can be set in the Strict-Transport-Security header; 'includeSubDomains' and 'preload'. " +
+				"The 'strict-transport-security' flag must be set to a non-zero value for these options to be used.",
+			Flag: "strict-transport-security-options",
+		},
 		SSHKeygenAlgorithm: &codersdk.DeploymentConfigField[string]{
 			Name:    "SSH Keygen Algorithm",
 			Usage:   "The algorithm to use for generating ssh keys. Accepted values are \"ed25519\", \"ecdsa\", or \"rsa4096\".",
 			Flag:    "ssh-keygen-algorithm",
 			Default: "ed25519",
-		},
-		AutoImportTemplates: &codersdk.DeploymentConfigField[[]string]{
-			Name:   "Auto Import Templates",
-			Usage:  "Templates to auto-import. Available auto-importable templates are: kubernetes",
-			Flag:   "auto-import-template",
-			Hidden: true,
 		},
 		MetricsCacheRefreshInterval: &codersdk.DeploymentConfigField[time.Duration]{
 			Name:    "Metrics Cache Refresh Interval",
@@ -341,6 +407,13 @@ func newConfig() *codersdk.DeploymentConfig {
 			Flag:    "agent-stats-refresh-interval",
 			Hidden:  true,
 			Default: 10 * time.Minute,
+		},
+		AgentFallbackTroubleshootingURL: &codersdk.DeploymentConfigField[string]{
+			Name:    "Agent Fallback Troubleshooting URL",
+			Usage:   "URL to use for agent troubleshooting when not set in the template",
+			Flag:    "agent-fallback-troubleshooting-url",
+			Hidden:  true,
+			Default: "https://coder.com/docs/coder-oss/latest/templates#troubleshooting-templates",
 		},
 		AuditLogging: &codersdk.DeploymentConfigField[bool]{
 			Name:       "Audit Logging",
@@ -362,18 +435,24 @@ func newConfig() *codersdk.DeploymentConfig {
 			Enterprise: true,
 			Secret:     true,
 		},
-		UserWorkspaceQuota: &codersdk.DeploymentConfigField[int]{
-			Name:       "User Workspace Quota",
-			Usage:      "Enables and sets a limit on how many workspaces each user can create.",
-			Flag:       "user-workspace-quota",
-			Enterprise: true,
-		},
 		Provisioner: &codersdk.ProvisionerConfig{
 			Daemons: &codersdk.DeploymentConfigField[int]{
 				Name:    "Provisioner Daemons",
 				Usage:   "Number of provisioner daemons to create on start. If builds are stuck in queued state for a long time, consider increasing this.",
 				Flag:    "provisioner-daemons",
 				Default: 3,
+			},
+			DaemonPollInterval: &codersdk.DeploymentConfigField[time.Duration]{
+				Name:    "Poll Interval",
+				Usage:   "Time to wait before polling for a new job.",
+				Flag:    "provisioner-daemon-poll-interval",
+				Default: time.Second,
+			},
+			DaemonPollJitter: &codersdk.DeploymentConfigField[time.Duration]{
+				Name:    "Poll Jitter",
+				Usage:   "Random jitter added to the poll interval.",
+				Flag:    "provisioner-daemon-poll-jitter",
+				Default: 100 * time.Millisecond,
 			},
 			ForceCancelInterval: &codersdk.DeploymentConfigField[time.Duration]{
 				Name:    "Force Cancel Interval",
@@ -382,16 +461,114 @@ func newConfig() *codersdk.DeploymentConfig {
 				Default: 10 * time.Minute,
 			},
 		},
-		APIRateLimit: &codersdk.DeploymentConfigField[int]{
-			Name:    "API Rate Limit",
-			Usage:   "Maximum number of requests per minute allowed to the API per user, or per IP address for unauthenticated users. Negative values mean no rate limit. Some API endpoints are always rate limited regardless of this value to prevent denial-of-service attacks.",
-			Flag:    "api-rate-limit",
-			Default: 512,
+		RateLimit: &codersdk.RateLimitConfig{
+			DisableAll: &codersdk.DeploymentConfigField[bool]{
+				Name:    "Disable All Rate Limits",
+				Usage:   "Disables all rate limits. This is not recommended in production.",
+				Flag:    "dangerous-disable-rate-limits",
+				Default: false,
+			},
+			API: &codersdk.DeploymentConfigField[int]{
+				Name:  "API Rate Limit",
+				Usage: "Maximum number of requests per minute allowed to the API per user, or per IP address for unauthenticated users. Negative values mean no rate limit. Some API endpoints have separate strict rate limits regardless of this value to prevent denial-of-service or brute force attacks.",
+				// Change the env from the auto-generated CODER_RATE_LIMIT_API to the
+				// old value to avoid breaking existing deployments.
+				EnvOverride: "CODER_API_RATE_LIMIT",
+				Flag:        "api-rate-limit",
+				Default:     512,
+			},
 		},
+		// DEPRECATED: use Experiments instead.
 		Experimental: &codersdk.DeploymentConfigField[bool]{
-			Name:  "Experimental",
-			Usage: "Enable experimental features. Experimental features are not ready for production.",
-			Flag:  "experimental",
+			Name:    "Experimental",
+			Usage:   "Enable experimental features. Experimental features are not ready for production.",
+			Flag:    "experimental",
+			Default: false,
+			Hidden:  true,
+		},
+		Experiments: &codersdk.DeploymentConfigField[[]string]{
+			Name:    "Experiments",
+			Usage:   "Enable one or more experiments. These are not ready for production. Separate multiple experiments with commas, or enter '*' to opt-in to all available experiments.",
+			Flag:    "experiments",
+			Default: []string{},
+		},
+		UpdateCheck: &codersdk.DeploymentConfigField[bool]{
+			Name:    "Update Check",
+			Usage:   "Periodically check for new releases of Coder and inform the owner. The check is performed once per day.",
+			Flag:    "update-check",
+			Default: flag.Lookup("test.v") == nil && !buildinfo.IsDev(),
+		},
+		MaxTokenLifetime: &codersdk.DeploymentConfigField[time.Duration]{
+			Name:    "Max Token Lifetime",
+			Usage:   "The maximum lifetime duration users can specify when creating an API token.",
+			Flag:    "max-token-lifetime",
+			Default: 24 * 30 * time.Hour,
+		},
+		Swagger: &codersdk.SwaggerConfig{
+			Enable: &codersdk.DeploymentConfigField[bool]{
+				Name:    "Enable swagger endpoint",
+				Usage:   "Expose the swagger endpoint via /swagger.",
+				Flag:    "swagger-enable",
+				Default: false,
+			},
+		},
+		Logging: &codersdk.LoggingConfig{
+			Human: &codersdk.DeploymentConfigField[string]{
+				Name:    "Human Log Location",
+				Usage:   "Output human-readable logs to a given file.",
+				Flag:    "log-human",
+				Default: "/dev/stderr",
+			},
+			JSON: &codersdk.DeploymentConfigField[string]{
+				Name:    "JSON Log Location",
+				Usage:   "Output JSON logs to a given file.",
+				Flag:    "log-json",
+				Default: "",
+			},
+			Stackdriver: &codersdk.DeploymentConfigField[string]{
+				Name:    "Stackdriver Log Location",
+				Usage:   "Output Stackdriver compatible logs to a given file.",
+				Flag:    "log-stackdriver",
+				Default: "",
+			},
+		},
+		Dangerous: &codersdk.DangerousConfig{
+			AllowPathAppSharing: &codersdk.DeploymentConfigField[bool]{
+				Name:    "DANGEROUS: Allow Path App Sharing",
+				Usage:   "Allow workspace apps that are not served from subdomains to be shared. Path-based app sharing is DISABLED by default for security purposes. Path-based apps can make requests to the Coder API and pose a security risk when the workspace serves malicious JavaScript. Path-based apps can be disabled entirely with --disable-path-apps for further security.",
+				Flag:    "dangerous-allow-path-app-sharing",
+				Default: false,
+			},
+			AllowPathAppSiteOwnerAccess: &codersdk.DeploymentConfigField[bool]{
+				Name:    "DANGEROUS: Allow Site Owners to Access Path Apps",
+				Usage:   "Allow site-owners to access workspace apps from workspaces they do not own. Owners cannot access path-based apps they do not own by default. Path-based apps can make requests to the Coder API and pose a security risk when the workspace serves malicious JavaScript. Path-based apps can be disabled entirely with --disable-path-apps for further security.",
+				Flag:    "dangerous-allow-path-app-site-owner-access",
+				Default: false,
+			},
+		},
+		DisablePathApps: &codersdk.DeploymentConfigField[bool]{
+			Name:    "Disable Path Apps",
+			Usage:   "Disable workspace apps that are not served from subdomains. Path-based apps can make requests to the Coder API and pose a security risk when the workspace serves malicious JavaScript. This is recommended for security purposes if a --wildcard-access-url is configured.",
+			Flag:    "disable-path-apps",
+			Default: false,
+		},
+		SessionDuration: &codersdk.DeploymentConfigField[time.Duration]{
+			Name:    "Session Duration",
+			Usage:   "The token expiry duration for browser sessions. Sessions may last longer if they are actively making requests, but this functionality can be disabled via --disable-session-expiry-refresh.",
+			Flag:    "session-duration",
+			Default: 24 * time.Hour,
+		},
+		DisableSessionExpiryRefresh: &codersdk.DeploymentConfigField[bool]{
+			Name:    "Disable Session Expiry Refresh",
+			Usage:   "Disable automatic session expiry bumping due to activity. This forces all sessions to become invalid after the session expiry duration has been reached.",
+			Flag:    "disable-session-expiry-refresh",
+			Default: false,
+		},
+		DisablePasswordAuth: &codersdk.DeploymentConfigField[bool]{
+			Name:    "Disable Password Authentication",
+			Usage:   "Disable password authentication. This is recommended for security purposes in production deployments that rely on an identity provider. Any user with the owner role will be able to sign in with their password regardless of this setting to avoid potential lock out. If you are locked out of your account, you can use the `coder server create-admin` command to create a new admin user directly in the database.",
+			Flag:    "disable-password-auth",
+			Default: false,
 		},
 	}
 }
@@ -431,31 +608,40 @@ func setConfig(prefix string, vip *viper.Viper, target interface{}) {
 	// assigned a value.
 	if strings.HasPrefix(typ.Name(), "DeploymentConfigField[") {
 		value := val.FieldByName("Value").Interface()
+
+		env, ok := val.FieldByName("EnvOverride").Interface().(string)
+		if !ok {
+			panic("DeploymentConfigField[].EnvOverride must be a string")
+		}
+		if env == "" {
+			env = formatEnv(prefix)
+		}
+
 		switch value.(type) {
 		case string:
-			vip.MustBindEnv(prefix, formatEnv(prefix))
+			vip.MustBindEnv(prefix, env)
 			val.FieldByName("Value").SetString(vip.GetString(prefix))
 		case bool:
-			vip.MustBindEnv(prefix, formatEnv(prefix))
+			vip.MustBindEnv(prefix, env)
 			val.FieldByName("Value").SetBool(vip.GetBool(prefix))
 		case int:
-			vip.MustBindEnv(prefix, formatEnv(prefix))
+			vip.MustBindEnv(prefix, env)
 			val.FieldByName("Value").SetInt(int64(vip.GetInt(prefix)))
 		case time.Duration:
-			vip.MustBindEnv(prefix, formatEnv(prefix))
+			vip.MustBindEnv(prefix, env)
 			val.FieldByName("Value").SetInt(int64(vip.GetDuration(prefix)))
 		case []string:
-			vip.MustBindEnv(prefix, formatEnv(prefix))
+			vip.MustBindEnv(prefix, env)
 			// As of October 21st, 2022 we supported delimiting a string
 			// with a comma, but Viper only supports with a space. This
 			// is a small hack around it!
 			rawSlice := reflect.ValueOf(vip.GetStringSlice(prefix)).Interface()
-			slice, ok := rawSlice.([]string)
+			stringSlice, ok := rawSlice.([]string)
 			if !ok {
 				panic(fmt.Sprintf("string slice is of type %T", rawSlice))
 			}
-			value := make([]string, 0, len(slice))
-			for _, entry := range slice {
+			value := make([]string, 0, len(stringSlice))
+			for _, entry := range stringSlice {
 				value = append(value, strings.Split(entry, ",")...)
 			}
 			val.FieldByName("Value").Set(reflect.ValueOf(value))
@@ -513,6 +699,9 @@ func readSliceFromViper[T any](vip *viper.Viper, key string, value any) []T {
 
 			// Ensure the env entry for this key is registered
 			// before checking value.
+			//
+			// We don't support DeploymentConfigField[].EnvOverride for array flags so
+			// this is fine to just use `formatEnv` here.
 			vip.MustBindEnv(configKey, formatEnv(configKey))
 
 			value := vip.Get(configKey)
@@ -523,9 +712,11 @@ func readSliceFromViper[T any](vip *viper.Viper, key string, value any) []T {
 				newType := reflect.Indirect(reflect.New(elementType))
 				instance = &newType
 			}
-			switch instance.Field(i).Type().String() {
+			switch v := instance.Field(i).Type().String(); v {
 			case "[]string":
 				value = vip.GetStringSlice(configKey)
+			case "bool":
+				value = vip.GetBool(configKey)
 			default:
 			}
 			instance.Field(i).Set(reflect.ValueOf(value))
@@ -557,7 +748,7 @@ func setViperDefaults(prefix string, vip *viper.Viper, target interface{}) {
 	val := reflect.ValueOf(target).Elem()
 	val = reflect.Indirect(val)
 	typ := val.Type()
-	if strings.HasPrefix(typ.Name(), "DeploymentConfigField") {
+	if strings.HasPrefix(typ.Name(), "DeploymentConfigField[") {
 		value := val.FieldByName("Default").Interface()
 		vip.SetDefault(prefix, value)
 		return
@@ -594,7 +785,7 @@ func AttachFlags(flagset *pflag.FlagSet, vip *viper.Viper, enterprise bool) {
 func setFlags(prefix string, flagset *pflag.FlagSet, vip *viper.Viper, target interface{}, enterprise bool) {
 	val := reflect.Indirect(reflect.ValueOf(target))
 	typ := val.Type()
-	if strings.HasPrefix(typ.Name(), "DeploymentConfigField") {
+	if strings.HasPrefix(typ.Name(), "DeploymentConfigField[") {
 		isEnt := val.FieldByName("Enterprise").Bool()
 		if enterprise != isEnt {
 			return
@@ -603,15 +794,24 @@ func setFlags(prefix string, flagset *pflag.FlagSet, vip *viper.Viper, target in
 		if flg == "" {
 			return
 		}
+
+		env, ok := val.FieldByName("EnvOverride").Interface().(string)
+		if !ok {
+			panic("DeploymentConfigField[].EnvOverride must be a string")
+		}
+		if env == "" {
+			env = formatEnv(prefix)
+		}
+
 		usage := val.FieldByName("Usage").String()
-		usage = fmt.Sprintf("%s\n%s", usage, cliui.Styles.Placeholder.Render("Consumes $"+formatEnv(prefix)))
+		usage = fmt.Sprintf("%s\n%s", usage, cliui.Styles.Placeholder.Render("Consumes $"+env))
 		shorthand := val.FieldByName("Shorthand").String()
 		hidden := val.FieldByName("Hidden").Bool()
 		value := val.FieldByName("Default").Interface()
 
 		// Allow currently set environment variables
 		// to override default values in help output.
-		vip.MustBindEnv(prefix, formatEnv(prefix))
+		vip.MustBindEnv(prefix, env)
 
 		switch value.(type) {
 		case string:
@@ -666,7 +866,7 @@ func formatEnv(key string) string {
 	return "CODER_" + strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(key))
 }
 
-func defaultCacheDir() string {
+func DefaultCacheDir() string {
 	defaultCacheDir, err := os.UserCacheDir()
 	if err != nil {
 		defaultCacheDir = os.TempDir()

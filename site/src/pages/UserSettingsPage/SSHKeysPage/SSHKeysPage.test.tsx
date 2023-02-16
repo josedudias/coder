@@ -1,13 +1,14 @@
 import { fireEvent, screen, within } from "@testing-library/react"
 import * as API from "../../../api/api"
-import { GlobalSnackbar } from "../../../components/GlobalSnackbar/GlobalSnackbar"
 import {
   MockGitSSHKey,
   renderWithAuth,
 } from "../../../testHelpers/renderHelpers"
-import { Language as authXServiceLanguage } from "../../../xServices/auth/authXService"
 import { Language as SSHKeysPageLanguage, SSHKeysPage } from "./SSHKeysPage"
 import { Language as SSHKeysPageViewLanguage } from "./SSHKeysPageView"
+import { i18n } from "i18n"
+
+const { t } = i18n
 
 describe("SSH keys Page", () => {
   it("shows the SSH key", async () => {
@@ -18,12 +19,7 @@ describe("SSH keys Page", () => {
   describe("regenerate SSH key", () => {
     describe("when it is success", () => {
       it("shows a success message and updates the ssh key on the page", async () => {
-        renderWithAuth(
-          <>
-            <SSHKeysPage />
-            <GlobalSnackbar />
-          </>,
-        )
+        renderWithAuth(<SSHKeysPage />)
 
         // Wait to the ssh be rendered on the screen
         await screen.findByText(MockGitSSHKey.public_key)
@@ -52,7 +48,10 @@ describe("SSH keys Page", () => {
         fireEvent.click(confirmButton)
 
         // Check if the success message is displayed
-        await screen.findByText(authXServiceLanguage.successRegenerateSSHKey)
+        const successMessage = t("sshRegenerateSuccessMessage", {
+          ns: "userSettingsPage",
+        })
+        await screen.findByText(successMessage)
 
         // Check if the API was called correctly
         expect(API.regenerateUserSSHKey).toBeCalledTimes(1)
@@ -64,12 +63,7 @@ describe("SSH keys Page", () => {
 
     describe("when it fails", () => {
       it("shows an error message", async () => {
-        renderWithAuth(
-          <>
-            <SSHKeysPage />
-            <GlobalSnackbar />
-          </>,
-        )
+        renderWithAuth(<SSHKeysPage />)
 
         // Wait to the ssh be rendered on the screen
         await screen.findByText(MockGitSSHKey.public_key)

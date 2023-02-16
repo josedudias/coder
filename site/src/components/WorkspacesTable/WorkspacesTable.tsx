@@ -4,48 +4,46 @@ import TableCell from "@material-ui/core/TableCell"
 import TableContainer from "@material-ui/core/TableContainer"
 import TableHead from "@material-ui/core/TableHead"
 import TableRow from "@material-ui/core/TableRow"
+import { Workspace } from "api/typesGenerated"
 import { FC } from "react"
-import { WorkspaceItemMachineRef } from "../../xServices/workspaces/workspacesXService"
 import { WorkspacesTableBody } from "./WorkspacesTableBody"
 
 const Language = {
   name: "Name",
   template: "Template",
   lastUsed: "Last Used",
-  version: "Version",
   status: "Status",
   lastBuiltBy: "Last Built By",
 }
 
 export interface WorkspacesTableProps {
-  isLoading?: boolean
-  workspaceRefs?: WorkspaceItemMachineRef[]
-  filter?: string
-  isNonInitialPage: boolean
+  workspaces?: Workspace[]
+  isUsingFilter: boolean
+  onUpdateWorkspace: (workspace: Workspace) => void
 }
 
-export const WorkspacesTable: FC<
-  React.PropsWithChildren<WorkspacesTableProps>
-> = ({ isLoading, workspaceRefs, filter, isNonInitialPage }) => {
+export const WorkspacesTable: FC<WorkspacesTableProps> = ({
+  workspaces,
+  isUsingFilter,
+  onUpdateWorkspace,
+}) => {
   return (
     <TableContainer>
       <Table>
         <TableHead>
           <TableRow>
-            <TableCell width="25%">{Language.name}</TableCell>
-            <TableCell width="35%">{Language.template}</TableCell>
+            <TableCell width="40%">{Language.name}</TableCell>
+            <TableCell width="25%">{Language.template}</TableCell>
             <TableCell width="20%">{Language.lastUsed}</TableCell>
-            <TableCell width="20%">{Language.version}</TableCell>
-            <TableCell width="20%">{Language.status}</TableCell>
-            <TableCell width="1%"></TableCell>
+            <TableCell width="15%">{Language.status}</TableCell>
+            <TableCell width="1%" />
           </TableRow>
         </TableHead>
         <TableBody>
           <WorkspacesTableBody
-            isLoading={isLoading}
-            workspaceRefs={workspaceRefs}
-            filter={filter}
-            isNonInitialPage={isNonInitialPage}
+            workspaces={workspaces}
+            isUsingFilter={isUsingFilter}
+            onUpdateWorkspace={onUpdateWorkspace}
           />
         </TableBody>
       </Table>

@@ -13,6 +13,7 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/go-chi/chi/v5"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"cdr.dev/slog"
 	"github.com/coder/coder/coderd"
@@ -20,12 +21,12 @@ import (
 	"github.com/coder/coder/coderd/httpapi"
 	"github.com/coder/coder/coderd/httpmw"
 	"github.com/coder/coder/coderd/rbac"
-	"github.com/coder/coder/coderd/workspacequota"
 	"github.com/coder/coder/codersdk"
 	"github.com/coder/coder/enterprise/coderd/license"
 	"github.com/coder/coder/enterprise/derpmesh"
 	"github.com/coder/coder/enterprise/replicasync"
 	"github.com/coder/coder/enterprise/tailnet"
+	"github.com/coder/coder/provisionerd/proto"
 	agpltailnet "github.com/coder/coder/tailnet"
 )
 
@@ -42,8 +43,11 @@ func New(ctx context.Context, options *Options) (*API, error) {
 	if options.Options == nil {
 		options.Options = &coderd.Options{}
 	}
+	if options.PrometheusRegistry == nil {
+		options.PrometheusRegistry = prometheus.NewRegistry()
+	}
 	if options.Options.Authorizer == nil {
-		options.Options.Authorizer = rbac.NewAuthorizer()
+		options.Options.Authorizer = rbac.NewCachingAuthorizer(options.PrometheusRegistry)
 	}
 	ctx, cancelFunc := context.WithCancel(ctx)
 	api := &API{
@@ -51,6 +55,8 @@ func New(ctx context.Context, options *Options) (*API, error) {
 		Options:                options,
 		cancelEntitlementsLoop: cancelFunc,
 	}
+
+	api.AGPL.Options.SetUserGroups = api.setUserGroups
 
 	oauthConfigs := &httpmw.OAuth2Configs{
 		Github: options.GithubOAuth2Config,
@@ -81,16 +87,24 @@ func New(ctx context.Context, options *Options) (*API, error) {
 				httpmw.ExtractOrganizationParam(api.Database),
 			)
 			r.Post("/", api.postGroupByOrganization)
-			r.Get("/", api.groups)
+			r.Get("/", api.groupsByOrganization)
 			r.Route("/{groupName}", func(r chi.Router) {
 				r.Use(
 					httpmw.ExtractGroupByNameParam(api.Database),
 				)
 
-				r.Get("/", api.group)
+				r.Get("/", api.groupByOrganization)
 			})
 		})
-
+		r.Route("/organizations/{organization}/provisionerdaemons", func(r chi.Router) {
+			r.Use(
+				api.provisionerDaemonsEnabledMW,
+				apiKeyMiddleware,
+				httpmw.ExtractOrganizationParam(api.Database),
+			)
+			r.Get("/", api.provisionerDaemons)
+			r.Get("/serve", api.provisionerDaemonServe)
+		})
 		r.Route("/templates/{template}/acl", func(r chi.Router) {
 			r.Use(
 				api.templateRBACEnabledMW,
@@ -100,7 +114,6 @@ func New(ctx context.Context, options *Options) (*API, error) {
 			r.Get("/", api.templateACL)
 			r.Patch("/", api.patchTemplateACL)
 		})
-
 		r.Route("/groups/{group}", func(r chi.Router) {
 			r.Use(
 				api.templateRBACEnabledMW,
@@ -111,19 +124,29 @@ func New(ctx context.Context, options *Options) (*API, error) {
 			r.Patch("/", api.patchGroup)
 			r.Delete("/", api.deleteGroup)
 		})
-
 		r.Route("/workspace-quota", func(r chi.Router) {
-			r.Use(apiKeyMiddleware)
+			r.Use(
+				apiKeyMiddleware,
+			)
 			r.Route("/{user}", func(r chi.Router) {
 				r.Use(httpmw.ExtractUserParam(options.Database, false))
 				r.Get("/", api.workspaceQuota)
 			})
 		})
+		r.Route("/appearance", func(r chi.Router) {
+			r.Use(
+				apiKeyMiddleware,
+			)
+			r.Get("/", api.appearance)
+			r.Put("/", api.putAppearance)
+		})
 	})
 
 	if len(options.SCIMAPIKey) != 0 {
 		api.AGPL.RootHandler.Route("/scim/v2", func(r chi.Router) {
-			r.Use(api.scimEnabledMW)
+			r.Use(
+				api.scimEnabledMW,
+			)
 			r.Post("/Users", api.scimPostUser)
 			r.Route("/Users", func(r chi.Router) {
 				r.Get("/", api.scimGetUsers)
@@ -183,9 +206,8 @@ type Options struct {
 	RBAC         bool
 	AuditLogging bool
 	// Whether to block non-browser connections.
-	BrowserOnly        bool
-	SCIMAPIKey         []byte
-	UserWorkspaceQuota int
+	BrowserOnly bool
+	SCIMAPIKey  []byte
 
 	// Used for high availability.
 	DERPServerRelayAddress string
@@ -220,21 +242,37 @@ func (api *API) updateEntitlements(ctx context.Context) error {
 	api.entitlementsMu.Lock()
 	defer api.entitlementsMu.Unlock()
 
-	entitlements, err := license.Entitlements(ctx, api.Database, api.Logger, len(api.replicaManager.All()), len(api.GitAuthConfigs), api.Keys, map[string]bool{
-		codersdk.FeatureAuditLog:         api.AuditLogging,
-		codersdk.FeatureBrowserOnly:      api.BrowserOnly,
-		codersdk.FeatureSCIM:             len(api.SCIMAPIKey) != 0,
-		codersdk.FeatureWorkspaceQuota:   api.UserWorkspaceQuota != 0,
-		codersdk.FeatureHighAvailability: api.DERPServerRelayAddress != "",
-		codersdk.FeatureMultipleGitAuth:  len(api.GitAuthConfigs) > 1,
-		codersdk.FeatureTemplateRBAC:     api.RBAC,
-	})
+	entitlements, err := license.Entitlements(
+		ctx, api.Database,
+		api.Logger, len(api.replicaManager.All()), len(api.GitAuthConfigs), api.Keys, map[codersdk.FeatureName]bool{
+			codersdk.FeatureAuditLog:                   api.AuditLogging,
+			codersdk.FeatureBrowserOnly:                api.BrowserOnly,
+			codersdk.FeatureSCIM:                       len(api.SCIMAPIKey) != 0,
+			codersdk.FeatureHighAvailability:           api.DERPServerRelayAddress != "",
+			codersdk.FeatureMultipleGitAuth:            len(api.GitAuthConfigs) > 1,
+			codersdk.FeatureTemplateRBAC:               api.RBAC,
+			codersdk.FeatureExternalProvisionerDaemons: true,
+		})
 	if err != nil {
 		return err
 	}
-	entitlements.Experimental = api.DeploymentConfig.Experimental.Value
 
-	featureChanged := func(featureName string) (changed bool, enabled bool) {
+	if entitlements.RequireTelemetry && !api.DeploymentConfig.Telemetry.Enable.Value {
+		// We can't fail because then the user couldn't remove the offending
+		// license w/o a restart.
+		//
+		// We don't simply append to entitlement.Errors since we don't want any
+		// enterprise features enabled.
+		api.entitlements.Errors = []string{
+			"License requires telemetry but telemetry is disabled",
+		}
+		api.Logger.Error(ctx, "license requires telemetry enabled")
+		return nil
+	}
+
+	entitlements.Experimental = api.DeploymentConfig.Experimental.Value || len(api.AGPL.Experiments) != 0
+
+	featureChanged := func(featureName codersdk.FeatureName) (changed bool, enabled bool) {
 		if api.entitlements.Features == nil {
 			return true, entitlements.Features[featureName].Enabled
 		}
@@ -262,12 +300,14 @@ func (api *API) updateEntitlements(ctx context.Context) error {
 		api.AGPL.WorkspaceClientCoordinateOverride.Store(&handler)
 	}
 
-	if changed, enabled := featureChanged(codersdk.FeatureWorkspaceQuota); changed {
-		enforcer := workspacequota.NewNop()
+	if changed, enabled := featureChanged(codersdk.FeatureTemplateRBAC); changed {
 		if enabled {
-			enforcer = NewEnforcer(api.Options.UserWorkspaceQuota)
+			committer := committer{Database: api.Database}
+			ptr := proto.QuotaCommitter(&committer)
+			api.AGPL.QuotaCommitter.Store(&ptr)
+		} else {
+			api.AGPL.QuotaCommitter.Store(nil)
 		}
-		api.AGPL.WorkspaceQuotaEnforcer.Store(&enforcer)
 	}
 
 	if changed, enabled := featureChanged(codersdk.FeatureHighAvailability); changed {
@@ -315,6 +355,13 @@ func (api *API) updateEntitlements(ctx context.Context) error {
 	return nil
 }
 
+// @Summary Get entitlements
+// @ID get-entitlements
+// @Security CoderSessionToken
+// @Produce json
+// @Tags Enterprise
+// @Success 200 {object} codersdk.Entitlements
+// @Router /entitlements [get]
 func (api *API) serveEntitlements(rw http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	api.entitlementsMu.RLock()

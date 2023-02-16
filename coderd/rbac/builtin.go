@@ -1,6 +1,7 @@
 package rbac
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -18,6 +19,19 @@ const (
 	orgAdmin  string = "organization-admin"
 	orgMember string = "organization-member"
 )
+
+// RoleNames is a list of user assignable role names. The role names must be
+// in the builtInRoles map. Any non-user assignable roles will generate an
+// error on Expand.
+type RoleNames []string
+
+func (names RoleNames) Expand() ([]Role, error) {
+	return rolesByNames(names)
+}
+
+func (names RoleNames) Names() []string {
+	return names
+}
 
 // The functions below ONLY need to exist for roles that are "defaulted" in some way.
 // Any other roles (like auditor), can be listed and let the user select/assigned.
@@ -63,9 +77,11 @@ var (
 			return Role{
 				Name:        owner,
 				DisplayName: "Owner",
-				Site: permissions(map[string][]Action{
+				Site: Permissions(map[string][]Action{
 					ResourceWildcard.Type: {WildcardSymbol},
 				}),
+				Org:  map[string][]Permission{},
+				User: []Permission{},
 			}
 		},
 
@@ -74,14 +90,15 @@ var (
 			return Role{
 				Name:        member,
 				DisplayName: "",
-				Site: permissions(map[string][]Action{
+				Site: Permissions(map[string][]Action{
 					// All users can read all other users and know they exist.
 					ResourceUser.Type:           {ActionRead},
 					ResourceRoleAssignment.Type: {ActionRead},
 					// All users can see the provisioner daemons.
 					ResourceProvisionerDaemon.Type: {ActionRead},
 				}),
-				User: permissions(map[string][]Action{
+				Org: map[string][]Permission{},
+				User: Permissions(map[string][]Action{
 					ResourceWildcard.Type: {WildcardSymbol},
 				}),
 			}
@@ -94,12 +111,14 @@ var (
 			return Role{
 				Name:        auditor,
 				DisplayName: "Auditor",
-				Site: permissions(map[string][]Action{
+				Site: Permissions(map[string][]Action{
 					// Should be able to read all template details, even in orgs they
 					// are not in.
 					ResourceTemplate.Type: {ActionRead},
 					ResourceAuditLog.Type: {ActionRead},
 				}),
+				Org:  map[string][]Permission{},
+				User: []Permission{},
 			}
 		},
 
@@ -107,14 +126,18 @@ var (
 			return Role{
 				Name:        templateAdmin,
 				DisplayName: "Template Admin",
-				Site: permissions(map[string][]Action{
+				Site: Permissions(map[string][]Action{
 					ResourceTemplate.Type: {ActionCreate, ActionRead, ActionUpdate, ActionDelete},
 					// CRUD all files, even those they did not upload.
 					ResourceFile.Type:      {ActionCreate, ActionRead, ActionUpdate, ActionDelete},
 					ResourceWorkspace.Type: {ActionRead},
 					// CRUD to provisioner daemons for now.
 					ResourceProvisionerDaemon.Type: {ActionCreate, ActionRead, ActionUpdate, ActionDelete},
+					// Needs to read all organizations since
+					ResourceOrganization.Type: {ActionRead},
 				}),
+				Org:  map[string][]Permission{},
+				User: []Permission{},
 			}
 		},
 
@@ -122,13 +145,15 @@ var (
 			return Role{
 				Name:        userAdmin,
 				DisplayName: "User Admin",
-				Site: permissions(map[string][]Action{
+				Site: Permissions(map[string][]Action{
 					ResourceRoleAssignment.Type: {ActionCreate, ActionRead, ActionUpdate, ActionDelete},
 					ResourceUser.Type:           {ActionCreate, ActionRead, ActionUpdate, ActionDelete},
 					// Full perms to manage org members
 					ResourceOrganizationMember.Type: {ActionCreate, ActionRead, ActionUpdate, ActionDelete},
 					ResourceGroup.Type:              {ActionCreate, ActionRead, ActionUpdate, ActionDelete},
 				}),
+				Org:  map[string][]Permission{},
+				User: []Permission{},
 			}
 		},
 
@@ -138,6 +163,7 @@ var (
 			return Role{
 				Name:        roleName(orgAdmin, organizationID),
 				DisplayName: "Organization Admin",
+				Site:        []Permission{},
 				Org: map[string][]Permission{
 					organizationID: {
 						{
@@ -147,6 +173,7 @@ var (
 						},
 					},
 				},
+				User: []Permission{},
 			}
 		},
 
@@ -156,6 +183,7 @@ var (
 			return Role{
 				Name:        roleName(orgMember, organizationID),
 				DisplayName: "",
+				Site:        []Permission{},
 				Org: map[string][]Permission{
 					organizationID: {
 						{
@@ -179,6 +207,7 @@ var (
 						},
 					},
 				},
+				User: []Permission{},
 			}
 		},
 	}
@@ -190,6 +219,12 @@ var (
 	// The first key is the actor role, the second is the roles they can assign.
 	//	map[actor_role][assign_role]<can_assign>
 	assignRoles = map[string]map[string]bool{
+		"system": {
+			owner:     true,
+			member:    true,
+			orgAdmin:  true,
+			orgMember: true,
+		},
 		owner: {
 			owner:         true,
 			auditor:       true,
@@ -213,7 +248,10 @@ var (
 // CanAssignRole is a helper function that returns true if the user can assign
 // the specified role. This also can be used for removing a role.
 // This is a simple implementation for now.
-func CanAssignRole(roles []string, assignedRole string) bool {
+func CanAssignRole(expandable ExpandableRoles, assignedRole string) bool {
+	// For CanAssignRole, we only care about the names of the roles.
+	roles := expandable.Names()
+
 	assigned, assignedOrg, err := roleSplit(assignedRole)
 	if err != nil {
 		return false
@@ -244,6 +282,10 @@ func CanAssignRole(roles []string, assignedRole string) bool {
 
 // RoleByName returns the permissions associated with a given role name.
 // This allows just the role names to be stored and expanded when required.
+//
+// This function is exported so that the Display name can be returned to the
+// api. We should maybe make an exported function that returns just the
+// human-readable content of the Role struct (name + display name).
 func RoleByName(name string) (Role, error) {
 	roleName, orgID, err := roleSplit(name)
 	if err != nil {
@@ -266,7 +308,7 @@ func RoleByName(name string) (Role, error) {
 	return role, nil
 }
 
-func RolesByNames(roleNames []string) ([]Role, error) {
+func rolesByNames(roleNames []string) ([]Role, error) {
 	roles := make([]Role, 0, len(roleNames))
 	for _, n := range roleNames {
 		r, err := RoleByName(n)
@@ -388,9 +430,9 @@ func roleSplit(role string) (name string, orgID string, err error) {
 	return arr[0], "", nil
 }
 
-// permissions is just a helper function to make building roles that list out resources
+// Permissions is just a helper function to make building roles that list out resources
 // and actions a bit easier.
-func permissions(perms map[string][]Action) []Permission {
+func Permissions(perms map[string][]Action) []Permission {
 	list := make([]Permission, 0, len(perms))
 	for k, actions := range perms {
 		for _, act := range actions {
@@ -402,5 +444,9 @@ func permissions(perms map[string][]Action) []Permission {
 			})
 		}
 	}
+	// Deterministic ordering of permissions
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].ResourceType < list[j].ResourceType
+	})
 	return list
 }

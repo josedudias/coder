@@ -18,12 +18,13 @@
           buildInputs = with pkgs; [
             bash
             bat
+            cairo
             drpc.defaultPackage.${system}
             exa
             getopt
             git
             go-migrate
-            go_1_19
+            go_1_20
             golangci-lint
             gopls
             gotestsum
@@ -34,7 +35,10 @@
             nodejs
             openssh
             openssl
+            pango
+            pixman
             postgresql
+            pkg-config
             protoc-gen-go
             ripgrep
             shellcheck
@@ -43,6 +47,7 @@
             terraform
             typos
             yarn
+            yq
             zip
             zstd
           ];

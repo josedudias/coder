@@ -22,6 +22,18 @@ NAT between workspaces and coder server.
 Users connect to the coder server's dashboard and API through its `ACCESS_URL`
 as well. There must not be a NAT between users and the coder server.
 
+Template admins can overwrite the site-wide access URL at the template level by
+leveraging the `url` argument when [defining the Coder provider](https://registry.terraform.io/providers/coder/coder/latest/docs#url):
+
+```terraform
+provider "coder" {
+  url = "https://coder.namespace.svc.cluster.local"
+}
+```
+
+This is useful when debugging connectivity issues between the workspace agent and
+the Coder server.
+
 ## Web Apps
 
 The coder servers relays dashboard-initiated connections between the user and
@@ -86,7 +98,8 @@ $ coder server --derp-config-path derpmap.json
 
 The dashboard (and web apps opened through the dashboard) are served from the
 coder server, so they can only be geo-distributed with High Availability mode in
-our Enterprise Edition. [Reach out to sales](mailto:sales@coder.com) to learn more.
+our Enterprise Edition. [Reach out to Sales](https://coder.com/contact) to learn
+more.
 
 ## Browser-only connections (enterprise)
 

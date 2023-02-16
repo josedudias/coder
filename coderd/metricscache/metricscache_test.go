@@ -7,12 +7,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"cdr.dev/slog/sloggers/slogtest"
 	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/coderd/database/databasefake"
+	"github.com/coder/coder/coderd/database/dbfake"
+	"github.com/coder/coder/coderd/database/dbgen"
 	"github.com/coder/coder/coderd/metricscache"
 	"github.com/coder/coder/codersdk"
 	"github.com/coder/coder/testutil"
@@ -43,35 +43,36 @@ func TestCache_TemplateUsers(t *testing.T) {
 		want want
 	}{
 		{"empty", args{}, want{nil, 0}},
-		{"one hole", args{
-			rows: []database.InsertAgentStatParams{
+		{
+			"one hole", args{
+				rows: []database.InsertAgentStatParams{
+					{
+						CreatedAt: date(2022, 8, 27),
+						UserID:    zebra,
+					},
+					{
+						CreatedAt: date(2022, 8, 30),
+						UserID:    zebra,
+					},
+				},
+			}, want{[]codersdk.DAUEntry{
 				{
-					CreatedAt: date(2022, 8, 27),
-					UserID:    zebra,
+					Date:   date(2022, 8, 27),
+					Amount: 1,
 				},
 				{
-					CreatedAt: date(2022, 8, 30),
-					UserID:    zebra,
+					Date:   date(2022, 8, 28),
+					Amount: 0,
 				},
-			},
-		}, want{[]codersdk.DAUEntry{
-			{
-				Date:   date(2022, 8, 27),
-				Amount: 1,
-			},
-			{
-				Date:   date(2022, 8, 28),
-				Amount: 0,
-			},
-			{
-				Date:   date(2022, 8, 29),
-				Amount: 0,
-			},
-			{
-				Date:   date(2022, 8, 30),
-				Amount: 1,
-			},
-		}, 1},
+				{
+					Date:   date(2022, 8, 29),
+					Amount: 0,
+				},
+				{
+					Date:   date(2022, 8, 30),
+					Amount: 1,
+				},
+			}, 1},
 		},
 		{"no holes", args{
 			rows: []database.InsertAgentStatParams{
@@ -162,37 +163,36 @@ func TestCache_TemplateUsers(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var (
-				db    = databasefake.New()
+				db    = dbfake.New()
 				cache = metricscache.New(db, slogtest.Make(t, nil), testutil.IntervalFast)
 			)
 
 			defer cache.Close()
 
-			templateID := uuid.New()
-			db.InsertTemplate(context.Background(), database.InsertTemplateParams{
-				ID: templateID,
+			template := dbgen.Template(t, db, database.Template{
+				Provisioner: database.ProvisionerTypeEcho,
 			})
 
-			gotUniqueUsers, ok := cache.TemplateUniqueUsers(templateID)
+			gotUniqueUsers, ok := cache.TemplateUniqueUsers(template.ID)
 			require.False(t, ok, "template shouldn't have loaded yet")
 			require.EqualValues(t, -1, gotUniqueUsers)
 
 			for _, row := range tt.args.rows {
-				row.TemplateID = templateID
+				row.TemplateID = template.ID
 				db.InsertAgentStat(context.Background(), row)
 			}
 
 			require.Eventuallyf(t, func() bool {
-				_, ok := cache.TemplateDAUs(templateID)
+				_, ok := cache.TemplateDAUs(template.ID)
 				return ok
 			}, testutil.WaitShort, testutil.IntervalMedium,
 				"TemplateDAUs never populated",
 			)
 
-			gotUniqueUsers, ok = cache.TemplateUniqueUsers(templateID)
+			gotUniqueUsers, ok = cache.TemplateUniqueUsers(template.ID)
 			require.True(t, ok)
 
-			gotEntries, ok := cache.TemplateDAUs(templateID)
+			gotEntries, ok := cache.TemplateDAUs(template.ID)
 			require.True(t, ok)
 			require.Equal(t, tt.want.entries, gotEntries.Entries)
 			require.Equal(t, tt.want.uniqueUsers, gotUniqueUsers)
@@ -202,6 +202,12 @@ func TestCache_TemplateUsers(t *testing.T) {
 
 func clockTime(t time.Time, hour, minute, sec int) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), hour, minute, sec, t.Nanosecond(), t.Location())
+}
+
+func requireBuildTimeStatsEmpty(t *testing.T, stats codersdk.TemplateBuildTimeStats) {
+	require.Empty(t, stats[codersdk.WorkspaceTransitionStart])
+	require.Empty(t, stats[codersdk.WorkspaceTransitionStop])
+	require.Empty(t, stats[codersdk.WorkspaceTransitionDelete])
 }
 
 func TestCache_BuildTime(t *testing.T) {
@@ -228,46 +234,50 @@ func TestCache_BuildTime(t *testing.T) {
 		want want
 	}{
 		{"empty", args{}, want{-1, false}},
-		{"one/start", args{
-			rows: []jobParams{
-				{
-					startedAt:   clockTime(someDay, 10, 1, 0),
-					completedAt: clockTime(someDay, 10, 1, 10),
+		{
+			"one/start", args{
+				rows: []jobParams{
+					{
+						startedAt:   clockTime(someDay, 10, 1, 0),
+						completedAt: clockTime(someDay, 10, 1, 10),
+					},
 				},
-			},
-			transition: database.WorkspaceTransitionStart,
-		}, want{10 * 1000, true},
+				transition: database.WorkspaceTransitionStart,
+			}, want{10 * 1000, true},
 		},
-		{"two/stop", args{
-			rows: []jobParams{
-				{
-					startedAt:   clockTime(someDay, 10, 1, 0),
-					completedAt: clockTime(someDay, 10, 1, 10),
+		{
+			"two/stop", args{
+				rows: []jobParams{
+					{
+						startedAt:   clockTime(someDay, 10, 1, 0),
+						completedAt: clockTime(someDay, 10, 1, 10),
+					},
+					{
+						startedAt:   clockTime(someDay, 10, 1, 0),
+						completedAt: clockTime(someDay, 10, 1, 50),
+					},
 				},
-				{
-					startedAt:   clockTime(someDay, 10, 1, 0),
-					completedAt: clockTime(someDay, 10, 1, 50),
-				},
-			},
-			transition: database.WorkspaceTransitionStop,
-		}, want{50 * 1000, true},
+				transition: database.WorkspaceTransitionStop,
+			}, want{50 * 1000, true},
 		},
-		{"three/delete", args{
-			rows: []jobParams{
-				{
-					startedAt:   clockTime(someDay, 10, 1, 0),
-					completedAt: clockTime(someDay, 10, 1, 10),
+		{
+			"three/delete", args{
+				rows: []jobParams{
+					{
+						startedAt:   clockTime(someDay, 10, 1, 0),
+						completedAt: clockTime(someDay, 10, 1, 10),
+					},
+					{
+						startedAt:   clockTime(someDay, 10, 1, 0),
+						completedAt: clockTime(someDay, 10, 1, 50),
+					},
+					{
+						startedAt:   clockTime(someDay, 10, 1, 0),
+						completedAt: clockTime(someDay, 10, 1, 20),
+					},
 				},
-				{
-					startedAt:   clockTime(someDay, 10, 1, 0),
-					completedAt: clockTime(someDay, 10, 1, 50),
-				}, {
-					startedAt:   clockTime(someDay, 10, 1, 0),
-					completedAt: clockTime(someDay, 10, 1, 20),
-				},
-			},
-			transition: database.WorkspaceTransitionDelete,
-		}, want{20 * 1000, true},
+				transition: database.WorkspaceTransitionDelete,
+			}, want{20 * 1000, true},
 		},
 	}
 
@@ -278,14 +288,15 @@ func TestCache_BuildTime(t *testing.T) {
 			ctx := context.Background()
 
 			var (
-				db    = databasefake.New()
+				db    = dbfake.New()
 				cache = metricscache.New(db, slogtest.Make(t, nil), testutil.IntervalFast)
 			)
 
 			defer cache.Close()
 
 			template, err := db.InsertTemplate(ctx, database.InsertTemplateParams{
-				ID: uuid.New(),
+				ID:          uuid.New(),
+				Provisioner: database.ProvisionerTypeEcho,
 			})
 			require.NoError(t, err)
 
@@ -296,12 +307,14 @@ func TestCache_BuildTime(t *testing.T) {
 			require.NoError(t, err)
 
 			gotStats := cache.TemplateBuildTimeStats(template.ID)
-			require.Empty(t, gotStats, "should not have loaded yet")
+			requireBuildTimeStatsEmpty(t, gotStats)
 
 			for _, row := range tt.args.rows {
 				_, err := db.InsertProvisionerJob(ctx, database.InsertProvisionerJobParams{
-					ID:          uuid.New(),
-					Provisioner: database.ProvisionerTypeEcho,
+					ID:            uuid.New(),
+					Provisioner:   database.ProvisionerTypeEcho,
+					StorageMethod: database.ProvisionerStorageMethodFile,
+					Type:          database.ProvisionerJobTypeWorkspaceBuild,
 				})
 				require.NoError(t, err)
 
@@ -317,6 +330,7 @@ func TestCache_BuildTime(t *testing.T) {
 					TemplateVersionID: templateVersion.ID,
 					JobID:             job.ID,
 					Transition:        tt.args.transition,
+					Reason:            database.BuildReasonInitiator,
 				})
 				require.NoError(t, err)
 
@@ -328,36 +342,32 @@ func TestCache_BuildTime(t *testing.T) {
 			}
 
 			if tt.want.loads {
+				wantTransition := codersdk.WorkspaceTransition(tt.args.transition)
 				require.Eventuallyf(t, func() bool {
 					stats := cache.TemplateBuildTimeStats(template.ID)
-					return stats != codersdk.TemplateBuildTimeStats{}
+					return stats[wantTransition] != codersdk.TransitionStats{}
 				}, testutil.WaitLong, testutil.IntervalMedium,
 					"BuildTime never populated",
 				)
 
 				gotStats = cache.TemplateBuildTimeStats(template.ID)
-
-				if tt.args.transition == database.WorkspaceTransitionDelete {
-					require.Nil(t, gotStats.StopMillis)
-					require.Nil(t, gotStats.StartMillis)
-					require.Equal(t, tt.want.buildTimeMs, *gotStats.DeleteMillis)
-				}
-				if tt.args.transition == database.WorkspaceTransitionStart {
-					require.Nil(t, gotStats.StopMillis)
-					require.Nil(t, gotStats.DeleteMillis)
-					require.Equal(t, tt.want.buildTimeMs, *gotStats.StartMillis)
-				}
-				if tt.args.transition == database.WorkspaceTransitionStop {
-					require.Nil(t, gotStats.StartMillis)
-					require.Nil(t, gotStats.DeleteMillis)
-					require.Equal(t, tt.want.buildTimeMs, *gotStats.StopMillis)
+				for transition, stats := range gotStats {
+					if transition == wantTransition {
+						require.Equal(t, tt.want.buildTimeMs, *stats.P50)
+					} else {
+						require.Empty(
+							t, stats, "%v", transition,
+						)
+					}
 				}
 			} else {
+				var stats codersdk.TemplateBuildTimeStats
 				require.Never(t, func() bool {
-					stats := cache.TemplateBuildTimeStats(template.ID)
-					return !assert.Empty(t, stats)
+					stats = cache.TemplateBuildTimeStats(template.ID)
+					requireBuildTimeStatsEmpty(t, stats)
+					return t.Failed()
 				}, testutil.WaitShort/2, testutil.IntervalMedium,
-					"BuildTimeStats populated",
+					"BuildTimeStats populated", stats,
 				)
 			}
 		})

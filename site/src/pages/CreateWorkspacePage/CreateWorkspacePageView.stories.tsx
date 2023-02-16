@@ -1,36 +1,17 @@
 import { ComponentMeta, Story } from "@storybook/react"
-import { ParameterSchema } from "../../api/typesGenerated"
-import { makeMockApiError, MockTemplate } from "../../testHelpers/entities"
+import {
+  makeMockApiError,
+  mockParameterSchema,
+  MockTemplate,
+  MockTemplateVersionParameter1,
+  MockTemplateVersionParameter2,
+  MockTemplateVersionParameter3,
+} from "../../testHelpers/entities"
 import {
   CreateWorkspaceErrors,
   CreateWorkspacePageView,
   CreateWorkspacePageViewProps,
 } from "./CreateWorkspacePageView"
-
-const createParameterSchema = (
-  partial: Partial<ParameterSchema>,
-): ParameterSchema => {
-  return {
-    id: "000000",
-    job_id: "000000",
-    allow_override_destination: false,
-    allow_override_source: true,
-    created_at: "",
-    default_destination_scheme: "none",
-    default_refresh: "",
-    default_source_scheme: "data",
-    default_source_value: "default-value",
-    name: "parameter name",
-    description: "Some description!",
-    redisplay_value: false,
-    validation_condition: "",
-    validation_contains: [],
-    validation_error: "",
-    validation_type_system: "",
-    validation_value_type: "",
-    ...partial,
-  }
-}
 
 export default {
   title: "pages/CreateWorkspacePageView",
@@ -54,10 +35,11 @@ Parameters.args = {
   templates: [MockTemplate],
   selectedTemplate: MockTemplate,
   templateSchema: [
-    createParameterSchema({
+    mockParameterSchema({
       name: "region",
       default_source_value: "🏈 US Central",
       description: "Where would you like your workspace to live?",
+      redisplay_value: true,
       validation_contains: [
         "🏈 US Central",
         "⚽ Brazil East",
@@ -65,23 +47,68 @@ Parameters.args = {
         "🦘 Australia South",
       ],
     }),
-    createParameterSchema({
+    mockParameterSchema({
       name: "instance_size",
       default_source_value: "Big",
       description: "How large should you instance be?",
       validation_contains: ["Small", "Medium", "Big"],
+      redisplay_value: true,
     }),
-    createParameterSchema({
+    mockParameterSchema({
       name: "instance_size",
       default_source_value: "Big",
       description: "How large should your instance be?",
       validation_contains: ["Small", "Medium", "Big"],
+      redisplay_value: true,
     }),
-    createParameterSchema({
+    mockParameterSchema({
       name: "disable_docker",
       description: "Disable Docker?",
       validation_value_type: "bool",
       default_source_value: "false",
+      redisplay_value: true,
+    }),
+  ],
+  createWorkspaceErrors: {},
+}
+
+export const RedisplayParameters = Template.bind({})
+RedisplayParameters.args = {
+  templates: [MockTemplate],
+  selectedTemplate: MockTemplate,
+  templateSchema: [
+    mockParameterSchema({
+      name: "region",
+      default_source_value: "🏈 US Central",
+      description: "Where would you like your workspace to live?",
+      redisplay_value: false,
+      validation_contains: [
+        "🏈 US Central",
+        "⚽ Brazil East",
+        "💶 EU West",
+        "🦘 Australia South",
+      ],
+    }),
+    mockParameterSchema({
+      name: "instance_size",
+      default_source_value: "Big",
+      description: "How large should you instance be?",
+      validation_contains: ["Small", "Medium", "Big"],
+      redisplay_value: false,
+    }),
+    mockParameterSchema({
+      name: "instance_size",
+      default_source_value: "Big",
+      description: "How large should your instance be?",
+      validation_contains: ["Small", "Medium", "Big"],
+      redisplay_value: true,
+    }),
+    mockParameterSchema({
+      name: "disable_docker",
+      description: "Disable Docker?",
+      validation_value_type: "bool",
+      default_source_value: "false",
+      redisplay_value: true,
     }),
   ],
   createWorkspaceErrors: {},
@@ -129,4 +156,16 @@ CreateWorkspaceError.args = {
   initialTouched: {
     name: true,
   },
+}
+
+export const RichParameters = Template.bind({})
+RichParameters.args = {
+  templates: [MockTemplate],
+  selectedTemplate: MockTemplate,
+  templateParameters: [
+    MockTemplateVersionParameter1,
+    MockTemplateVersionParameter2,
+    MockTemplateVersionParameter3,
+  ],
+  createWorkspaceErrors: {},
 }

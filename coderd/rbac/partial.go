@@ -3,11 +3,13 @@ package rbac
 import (
 	"context"
 
-	"golang.org/x/xerrors"
-
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/rego"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/xerrors"
 
+	"github.com/coder/coder/coderd/rbac/regosql"
 	"github.com/coder/coder/coderd/tracing"
 )
 
@@ -15,8 +17,12 @@ type PartialAuthorizer struct {
 	// partialQueries is mainly used for unit testing to assert our rego policy
 	// can always be compressed into a set of queries.
 	partialQueries *rego.PartialQueries
+
 	// input is used purely for debugging and logging.
-	input map[string]interface{}
+	subjectInput        Subject
+	subjectAction       Action
+	subjectResourceType Object
+
 	// preparedQueries are the compiled set of queries after partial evaluation.
 	// Cache these prepared queries to avoid re-compiling the queries.
 	// If alwaysTrue is true, then ignore these.
@@ -28,12 +34,20 @@ type PartialAuthorizer struct {
 
 var _ PreparedAuthorized = (*PartialAuthorizer)(nil)
 
-func (pa *PartialAuthorizer) Compile() (AuthorizeFilter, error) {
-	filter, err := Compile(pa)
+func (pa *PartialAuthorizer) CompileToSQL(ctx context.Context, cfg regosql.ConvertConfig) (string, error) {
+	_, span := tracing.StartSpan(ctx, trace.WithAttributes(
+		// Query count is a rough indicator of the complexity of the query
+		// that needs to be converted into SQL.
+		attribute.Int("query_count", len(pa.preparedQueries)),
+		attribute.Bool("always_true", pa.alwaysTrue),
+	))
+	defer span.End()
+
+	filter, err := Compile(cfg, pa)
 	if err != nil {
-		return nil, xerrors.Errorf("compile: %w", err)
+		return "", xerrors.Errorf("compile: %w", err)
 	}
-	return filter, nil
+	return filter.SQLString(), nil
 }
 
 func (pa *PartialAuthorizer) Authorize(ctx context.Context, object Object) error {
@@ -41,9 +55,11 @@ func (pa *PartialAuthorizer) Authorize(ctx context.Context, object Object) error
 		return nil
 	}
 
-	// No queries means always false
+	// If we have no queries, then no queries can return 'true'.
+	// So the result is always 'false'.
 	if len(pa.preparedQueries) == 0 {
-		return ForbiddenWithInternal(xerrors.Errorf("policy disallows request"), pa.input, nil)
+		return ForbiddenWithInternal(xerrors.Errorf("policy disallows request"),
+			pa.subjectInput, pa.subjectAction, pa.subjectResourceType, nil)
 	}
 
 	parsed, err := ast.InterfaceToValue(map[string]interface{}{
@@ -107,39 +123,25 @@ EachQueryLoop:
 		return nil
 	}
 
-	return ForbiddenWithInternal(xerrors.Errorf("policy disallows request"), pa.input, nil)
+	return ForbiddenWithInternal(xerrors.Errorf("policy disallows request"),
+		pa.subjectInput, pa.subjectAction, pa.subjectResourceType, nil)
 }
 
-func newPartialAuthorizer(ctx context.Context, subjectID string, roles []Role, scope Role, groups []string, action Action, objectType string) (*PartialAuthorizer, error) {
-	ctx, span := tracing.StartSpan(ctx)
-	defer span.End()
-
-	input := map[string]interface{}{
-		"subject": authSubject{
-			ID:     subjectID,
-			Roles:  roles,
-			Scope:  scope,
-			Groups: groups,
-		},
-		"object": map[string]string{
-			"type": objectType,
-		},
-		"action": action,
+func (a RegoAuthorizer) newPartialAuthorizer(ctx context.Context, subject Subject, action Action, objectType string) (*PartialAuthorizer, error) {
+	if subject.Roles == nil {
+		return nil, xerrors.Errorf("subject must have roles")
+	}
+	if subject.Scope == nil {
+		return nil, xerrors.Errorf("subject must have a scope")
 	}
 
-	// Run the rego policy with a few unknown fields. This should simplify our
-	// policy to a set of queries.
-	partialQueries, err := rego.New(
-		rego.Query("data.authz.allow = true"),
-		rego.Module("policy.rego", policy),
-		rego.Unknowns([]string{
-			"input.object.owner",
-			"input.object.org_owner",
-			"input.object.acl_user_list",
-			"input.object.acl_group_list",
-		}),
-		rego.Input(input),
-	).Partial(ctx)
+	input, err := regoPartialInputValue(subject, action, objectType)
+	if err != nil {
+		return nil, xerrors.Errorf("prepare input: %w", err)
+	}
+
+	partialQueries, err := a.partialQuery.Partial(ctx, rego.EvalParsedInput(input))
+
 	if err != nil {
 		return nil, xerrors.Errorf("prepare: %w", err)
 	}
@@ -147,7 +149,12 @@ func newPartialAuthorizer(ctx context.Context, subjectID string, roles []Role, s
 	pAuth := &PartialAuthorizer{
 		partialQueries:  partialQueries,
 		preparedQueries: []rego.PreparedEvalQuery{},
-		input:           input,
+		subjectInput:    subject,
+		subjectResourceType: Object{
+			Type: objectType,
+			ID:   "prepared-object",
+		},
+		subjectAction: action,
 	}
 
 	// Prepare each query to optimize the runtime when we iterate over the objects.

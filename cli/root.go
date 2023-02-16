@@ -5,10 +5,15 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"text/template"
 	"time"
 
@@ -27,6 +32,7 @@ import (
 	"github.com/coder/coder/coderd"
 	"github.com/coder/coder/coderd/gitauth"
 	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/codersdk/agentsdk"
 )
 
 var (
@@ -76,14 +82,16 @@ func Core() []*cobra.Command {
 		dotfiles(),
 		gitssh(),
 		list(),
-		loadtest(),
 		login(),
 		logout(),
 		parameters(),
+		ping(),
 		portForward(),
 		publickey(),
 		rename(),
 		resetPassword(),
+		restart(),
+		scaletest(),
 		schedules(),
 		show(),
 		speedtest(),
@@ -96,6 +104,7 @@ func Core() []*cobra.Command {
 		update(),
 		users(),
 		versionCmd(),
+		vscodeSSH(),
 		workspaceAgent(),
 	}
 }
@@ -135,53 +144,6 @@ func Root(subcommands []*cobra.Command) *cobra.Command {
 				return gitAskpass().RunE(cmd, args)
 			}
 			return cmd.Help()
-		},
-		PersistentPreRun: func(cmd *cobra.Command, args []string) {
-			if cliflag.IsSetBool(cmd, varNoVersionCheck) &&
-				cliflag.IsSetBool(cmd, varNoFeatureWarning) {
-				return
-			}
-
-			// login handles checking the versions itself since it has a handle
-			// to an unauthenticated client.
-			//
-			// server is skipped for obvious reasons.
-			//
-			// agent is skipped because these checks use the global coder config
-			// and not the agent URL and token from the environment.
-			//
-			// gitssh is skipped because it's usually not called by users
-			// directly.
-			if cmd.Name() == "login" || cmd.Name() == "server" || cmd.Name() == "agent" || cmd.Name() == "gitssh" {
-				return
-			}
-			if isGitAskpass {
-				return
-			}
-
-			client, err := CreateClient(cmd)
-			// If we are unable to create a client, presumably the subcommand will fail as well
-			// so we can bail out here.
-			if err != nil {
-				return
-			}
-
-			err = checkVersions(cmd, client)
-			if err != nil {
-				// Just log the error here. We never want to fail a command
-				// due to a pre-run.
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-					cliui.Styles.Warn.Render("check versions error: %s"), err)
-				_, _ = fmt.Fprintln(cmd.ErrOrStderr())
-			}
-
-			err = checkWarnings(cmd, client)
-			if err != nil {
-				// Same as above
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-					cliui.Styles.Warn.Render("check entitlement warnings error: %s"), err)
-				_, _ = fmt.Fprintln(cmd.ErrOrStderr())
-			}
 		},
 		Example: formatExamples(
 			example{
@@ -255,12 +217,22 @@ func versionCmd() *cobra.Command {
 		Short: "Show coder version",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var str strings.Builder
-			_, _ = str.WriteString(fmt.Sprintf("Coder %s", buildinfo.Version()))
+			_, _ = str.WriteString("Coder ")
+			if buildinfo.IsAGPL() {
+				_, _ = str.WriteString("(AGPL) ")
+			}
+			_, _ = str.WriteString(buildinfo.Version())
 			buildTime, valid := buildinfo.Time()
 			if valid {
 				_, _ = str.WriteString(" " + buildTime.Format(time.UnixDate))
 			}
-			_, _ = str.WriteString("\r\n" + buildinfo.ExternalURL() + "\r\n")
+			_, _ = str.WriteString("\r\n" + buildinfo.ExternalURL() + "\r\n\r\n")
+
+			if buildinfo.IsSlim() {
+				_, _ = str.WriteString(fmt.Sprintf("Slim build of Coder, does not support the %s subcommand.\n", cliui.Styles.Code.Render("server")))
+			} else {
+				_, _ = str.WriteString(fmt.Sprintf("Full build of Coder, supports the %s subcommand.\n", cliui.Styles.Code.Render("server")))
+			}
 
 			_, _ = fmt.Fprint(cmd.OutOrStdout(), str.String())
 			return nil
@@ -307,6 +279,37 @@ func CreateClient(cmd *cobra.Command) (*codersdk.Client, error) {
 		return nil, err
 	}
 	client.SetSessionToken(token)
+
+	// We send these requests in parallel to minimize latency.
+	var (
+		versionErr = make(chan error)
+		warningErr = make(chan error)
+	)
+	go func() {
+		versionErr <- checkVersions(cmd, client)
+		close(versionErr)
+	}()
+
+	go func() {
+		warningErr <- checkWarnings(cmd, client)
+		close(warningErr)
+	}()
+
+	if err = <-versionErr; err != nil {
+		// Just log the error here. We never want to fail a command
+		// due to a pre-run.
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			cliui.Styles.Warn.Render("check versions error: %s"), err)
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr())
+	}
+
+	if err = <-warningErr; err != nil {
+		// Same as above
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			cliui.Styles.Warn.Render("check entitlement warnings error: %s"), err)
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr())
+	}
+
 	return client, nil
 }
 
@@ -333,7 +336,7 @@ func createUnauthenticatedClient(cmd *cobra.Command, serverURL *url.URL) (*coder
 
 // createAgentClient returns a new client from the command context.
 // It works just like CreateClient, but uses the agent token and URL instead.
-func createAgentClient(cmd *cobra.Command) (*codersdk.Client, error) {
+func createAgentClient(cmd *cobra.Command) (*agentsdk.Client, error) {
 	rawURL, err := cmd.Flags().GetString(varAgentURL)
 	if err != nil {
 		return nil, err
@@ -346,7 +349,7 @@ func createAgentClient(cmd *cobra.Command) (*codersdk.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	client := codersdk.New(serverURL)
+	client := agentsdk.New(serverURL)
 	client.SetSessionToken(token)
 	return client, nil
 }
@@ -590,7 +593,7 @@ func checkVersions(cmd *cobra.Command, client *codersdk.Client) error {
 	clientVersion := buildinfo.Version()
 	info, err := client.BuildInfo(ctx)
 	// Avoid printing errors that are connection-related.
-	if codersdk.IsConnectionErr(err) {
+	if isConnectionError(err) {
 		return nil
 	}
 
@@ -599,12 +602,17 @@ func checkVersions(cmd *cobra.Command, client *codersdk.Client) error {
 	}
 
 	fmtWarningText := `version mismatch: client %s, server %s
-download the server version with: 'curl -L https://coder.com/install.sh | sh -s -- --version %s'
 `
+	// Our installation script doesn't work on Windows, so instead we direct the user
+	// to the GitHub release page to download the latest installer.
+	if runtime.GOOS == "windows" {
+		fmtWarningText += `download the server version from: https://github.com/coder/coder/releases/v%s`
+	} else {
+		fmtWarningText += `download the server version with: 'curl -L https://coder.com/install.sh | sh -s -- --version %s'`
+	}
 
 	if !buildinfo.VersionsMatch(clientVersion, info.Version) {
 		warn := cliui.Styles.Warn.Copy().Align(lipgloss.Left)
-		// Trim the leading 'v', our install.sh script does not handle this case well.
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), warn.Render(fmtWarningText), clientVersion, info.Version, strings.TrimPrefix(info.CanonicalVersion(), "v"))
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr())
 	}
@@ -639,4 +647,107 @@ func (h *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		req.Header.Add(k, v)
 	}
 	return h.transport.RoundTrip(req)
+}
+
+// dumpHandler provides a custom SIGQUIT and SIGTRAP handler that dumps the
+// stacktrace of all goroutines to stderr and a well-known file in the home
+// directory. This is useful for debugging deadlock issues that may occur in
+// production in workspaces, since the default Go runtime will only dump to
+// stderr (which is often difficult/impossible to read in a workspace).
+//
+// SIGQUITs will still cause the program to exit (similarly to the default Go
+// runtime behavior).
+//
+// A SIGQUIT handler will not be registered if GOTRACEBACK=crash.
+//
+// On Windows this immediately returns.
+func dumpHandler(ctx context.Context) {
+	if runtime.GOOS == "windows" {
+		// free up the goroutine since it'll be permanently blocked anyways
+		return
+	}
+
+	listenSignals := []os.Signal{syscall.SIGTRAP}
+	if os.Getenv("GOTRACEBACK") != "crash" {
+		listenSignals = append(listenSignals, syscall.SIGQUIT)
+	}
+
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, listenSignals...)
+	defer signal.Stop(sigs)
+
+	for {
+		sigStr := ""
+		select {
+		case <-ctx.Done():
+			return
+		case sig := <-sigs:
+			switch sig {
+			case syscall.SIGQUIT:
+				sigStr = "SIGQUIT"
+			case syscall.SIGTRAP:
+				sigStr = "SIGTRAP"
+			}
+		}
+
+		// Start with a 1MB buffer and keep doubling it until we can fit the
+		// entire stacktrace, stopping early once we reach 64MB.
+		buf := make([]byte, 1_000_000)
+		stacklen := 0
+		for {
+			stacklen = runtime.Stack(buf, true)
+			if stacklen < len(buf) {
+				break
+			}
+			if 2*len(buf) > 64_000_000 {
+				// Write a message to the end of the buffer saying that it was
+				// truncated.
+				const truncatedMsg = "\n\n\nstack trace truncated due to size\n"
+				copy(buf[len(buf)-len(truncatedMsg):], truncatedMsg)
+				break
+			}
+			buf = make([]byte, 2*len(buf))
+		}
+
+		_, _ = fmt.Fprintf(os.Stderr, "%s:\n%s\n", sigStr, buf[:stacklen])
+
+		// Write to a well-known file.
+		dir, err := os.UserHomeDir()
+		if err != nil {
+			dir = os.TempDir()
+		}
+		fpath := filepath.Join(dir, fmt.Sprintf("coder-agent-%s.dump", time.Now().Format("2006-01-02T15:04:05.000Z")))
+		_, _ = fmt.Fprintf(os.Stderr, "writing dump to %q\n", fpath)
+
+		f, err := os.Create(fpath)
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "failed to open dump file: %v\n", err.Error())
+			goto done
+		}
+		_, err = f.Write(buf[:stacklen])
+		_ = f.Close()
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "failed to write dump file: %v\n", err.Error())
+			goto done
+		}
+
+	done:
+		if sigStr == "SIGQUIT" {
+			//nolint:revive
+			os.Exit(1)
+		}
+	}
+}
+
+// IiConnectionErr is a convenience function for checking if the source of an
+// error is due to a 'connection refused', 'no such host', etc.
+func isConnectionError(err error) bool {
+	var (
+		// E.g. no such host
+		dnsErr *net.DNSError
+		// Eg. connection refused
+		opErr *net.OpError
+	)
+
+	return xerrors.As(err, &dnsErr) || xerrors.As(err, &opErr)
 }

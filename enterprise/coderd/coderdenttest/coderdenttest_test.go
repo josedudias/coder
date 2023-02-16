@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -12,6 +14,7 @@ import (
 	"github.com/coder/coder/coderd/rbac"
 	"github.com/coder/coder/codersdk"
 	"github.com/coder/coder/enterprise/coderd/coderdenttest"
+	"github.com/coder/coder/enterprise/coderd/license"
 	"github.com/coder/coder/testutil"
 )
 
@@ -21,32 +24,41 @@ func TestNew(t *testing.T) {
 }
 
 func TestAuthorizeAllEndpoints(t *testing.T) {
+	if strings.Contains(os.Getenv("CODER_EXPERIMENTS_TEST"), string(codersdk.ExperimentAuthzQuerier)) {
+		t.Skip("Skipping TestAuthorizeAllEndpoints for authz_querier experiment")
+	}
 	t.Parallel()
 	client, _, api := coderdenttest.NewWithAPI(t, &coderdenttest.Options{
 		Options: &coderdtest.Options{
 			// Required for any subdomain-based proxy tests to pass.
 			AppHostname:              "*.test.coder.com",
-			Authorizer:               &coderdtest.RecordingAuthorizer{},
+			Authorizer:               &coderdtest.RecordingAuthorizer{Wrapped: &coderdtest.FakeAuthorizer{}},
 			IncludeProvisionerDaemon: true,
 		},
 	})
 	ctx, _ := testutil.Context(t)
 	admin := coderdtest.CreateFirstUser(t, client)
-	license := coderdenttest.AddLicense(t, client, coderdenttest.LicenseOptions{
-		TemplateRBAC: true,
+	lic := coderdenttest.AddLicense(t, client, coderdenttest.LicenseOptions{
+		Features: license.Features{
+			codersdk.FeatureTemplateRBAC:               1,
+			codersdk.FeatureExternalProvisionerDaemons: 1,
+		},
 	})
 	group, err := client.CreateGroup(ctx, admin.OrganizationID, codersdk.CreateGroupRequest{
 		Name: "testgroup",
 	})
 	require.NoError(t, err)
 
-	groupObj := rbac.ResourceGroup.InOrg(admin.OrganizationID)
+	groupObj := rbac.ResourceGroup.WithID(group.ID).InOrg(admin.OrganizationID)
 	a := coderdtest.NewAuthTester(ctx, t, client, api.AGPL, admin)
-	a.URLParams["licenses/{id}"] = fmt.Sprintf("licenses/%d", license.ID)
+	a.URLParams["licenses/{id}"] = fmt.Sprintf("licenses/%d", lic.ID)
 	a.URLParams["groups/{group}"] = fmt.Sprintf("groups/%s", group.ID.String())
 	a.URLParams["{groupName}"] = group.Name
 
 	skipRoutes, assertRoute := coderdtest.AGPLRoutes(a)
+	skipRoutes["GET:/api/v2/organizations/{organization}/provisionerdaemons/serve"] = "This route checks for RBAC dependent on input parameters!"
+	skipRoutes["GET:/api/v2/appearance/"] = "This route is available to all users"
+
 	assertRoute["GET:/api/v2/entitlements"] = coderdtest.RouteCheck{
 		NoAuthorize: true,
 	}
@@ -83,6 +95,11 @@ func TestAuthorizeAllEndpoints(t *testing.T) {
 	assertRoute["GET:/api/v2/organizations/{organization}/groups/{groupName}"] = coderdtest.RouteCheck{
 		AssertAction: rbac.ActionRead,
 		AssertObject: groupObj,
+	}
+	assertRoute["GET:/api/v2/organizations/{organization}/provisionerdaemons"] = coderdtest.RouteCheck{
+		AssertAction: rbac.ActionRead,
+		AssertObject: rbac.ResourceProvisionerDaemon,
+		StatusCode:   http.StatusOK,
 	}
 	assertRoute["GET:/api/v2/groups/{group}"] = coderdtest.RouteCheck{
 		AssertAction: rbac.ActionRead,

@@ -20,6 +20,7 @@ import (
 	"golang.org/x/xerrors"
 
 	"github.com/coder/coder/coderd"
+	"github.com/coder/coder/coderd/audit"
 	"github.com/coder/coder/coderd/coderdtest"
 	"github.com/coder/coder/coderd/database"
 	"github.com/coder/coder/codersdk"
@@ -77,8 +78,8 @@ func TestUserAuthMethods(t *testing.T) {
 
 		methods, err := client.AuthMethods(ctx)
 		require.NoError(t, err)
-		require.True(t, methods.Password)
-		require.False(t, methods.Github)
+		require.True(t, methods.Password.Enabled)
+		require.False(t, methods.Github.Enabled)
 	})
 	t.Run("Github", func(t *testing.T) {
 		t.Parallel()
@@ -91,8 +92,8 @@ func TestUserAuthMethods(t *testing.T) {
 
 		methods, err := client.AuthMethods(ctx)
 		require.NoError(t, err)
-		require.True(t, methods.Password)
-		require.True(t, methods.Github)
+		require.True(t, methods.Password.Enabled)
+		require.True(t, methods.Github.Enabled)
 	})
 }
 
@@ -105,7 +106,9 @@ func TestUserOAuth2Github(t *testing.T) {
 
 	t.Run("NotInAllowedOrganization", func(t *testing.T) {
 		t.Parallel()
+		auditor := audit.NewMock()
 		client := coderdtest.New(t, &coderdtest.Options{
+			Auditor: auditor,
 			GithubOAuth2Config: &coderd.GithubOAuth2Config{
 				OAuth2Config: &oauth2Config{},
 				ListOrganizationMemberships: func(ctx context.Context, client *http.Client) ([]*github.Membership, error) {
@@ -118,13 +121,19 @@ func TestUserOAuth2Github(t *testing.T) {
 				},
 			},
 		})
+		numLogs := len(auditor.AuditLogs)
 
 		resp := oauth2Callback(t, client)
+		numLogs++ // add an audit log for login
 		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
 	})
 	t.Run("NotInAllowedTeam", func(t *testing.T) {
 		t.Parallel()
+		auditor := audit.NewMock()
 		client := coderdtest.New(t, &coderdtest.Options{
+			Auditor: auditor,
 			GithubOAuth2Config: &coderd.GithubOAuth2Config{
 				AllowOrganizations: []string{"coder"},
 				AllowTeams:         []coderd.GithubOAuth2Team{{"another", "something"}, {"coder", "frontend"}},
@@ -147,12 +156,20 @@ func TestUserOAuth2Github(t *testing.T) {
 				},
 			},
 		})
+		numLogs := len(auditor.AuditLogs)
+
 		resp := oauth2Callback(t, client)
+		numLogs++ // add an audit log for login
+
 		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
 	})
 	t.Run("UnverifiedEmail", func(t *testing.T) {
 		t.Parallel()
+		auditor := audit.NewMock()
 		client := coderdtest.New(t, &coderdtest.Options{
+			Auditor: auditor,
 			GithubOAuth2Config: &coderd.GithubOAuth2Config{
 				OAuth2Config:       &oauth2Config{},
 				AllowOrganizations: []string{"coder"},
@@ -175,13 +192,23 @@ func TestUserOAuth2Github(t *testing.T) {
 				},
 			},
 		})
+		numLogs := len(auditor.AuditLogs)
+
 		_ = coderdtest.CreateFirstUser(t, client)
+		numLogs++ // add an audit log for user create
+
 		resp := oauth2Callback(t, client)
-		require.Equal(t, http.StatusPreconditionRequired, resp.StatusCode)
+		numLogs++ // add an audit log for login
+
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
 	})
 	t.Run("BlockSignups", func(t *testing.T) {
 		t.Parallel()
+		auditor := audit.NewMock()
 		client := coderdtest.New(t, &coderdtest.Options{
+			Auditor: auditor,
 			GithubOAuth2Config: &coderd.GithubOAuth2Config{
 				OAuth2Config:       &oauth2Config{},
 				AllowOrganizations: []string{"coder"},
@@ -205,12 +232,20 @@ func TestUserOAuth2Github(t *testing.T) {
 				},
 			},
 		})
+		numLogs := len(auditor.AuditLogs)
+
 		resp := oauth2Callback(t, client)
+		numLogs++ // add an audit log for login
+
 		require.Equal(t, http.StatusForbidden, resp.StatusCode)
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
 	})
 	t.Run("MultiLoginNotAllowed", func(t *testing.T) {
 		t.Parallel()
+		auditor := audit.NewMock()
 		client := coderdtest.New(t, &coderdtest.Options{
+			Auditor: auditor,
 			GithubOAuth2Config: &coderd.GithubOAuth2Config{
 				OAuth2Config:       &oauth2Config{},
 				AllowOrganizations: []string{"coder"},
@@ -234,16 +269,26 @@ func TestUserOAuth2Github(t *testing.T) {
 				},
 			},
 		})
+		numLogs := len(auditor.AuditLogs)
+
 		// Creates the first user with login_type 'password'.
 		_ = coderdtest.CreateFirstUser(t, client)
+		numLogs++ // add an audit log for user create
+
 		// Attempting to login should give us a 403 since the user
 		// already has a login_type of 'password'.
 		resp := oauth2Callback(t, client)
+		numLogs++ // add an audit log for login
+
 		require.Equal(t, http.StatusForbidden, resp.StatusCode)
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
 	})
 	t.Run("Signup", func(t *testing.T) {
 		t.Parallel()
+		auditor := audit.NewMock()
 		client := coderdtest.New(t, &coderdtest.Options{
+			Auditor: auditor,
 			GithubOAuth2Config: &coderd.GithubOAuth2Config{
 				OAuth2Config:       &oauth2Config{},
 				AllowOrganizations: []string{"coder"},
@@ -272,7 +317,11 @@ func TestUserOAuth2Github(t *testing.T) {
 				},
 			},
 		})
+		numLogs := len(auditor.AuditLogs)
+
 		resp := oauth2Callback(t, client)
+		numLogs++ // add an audit log for login
+
 		require.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
 
 		client.SetSessionToken(authCookieValue(resp.Cookies()))
@@ -281,10 +330,15 @@ func TestUserOAuth2Github(t *testing.T) {
 		require.Equal(t, "kyle@coder.com", user.Email)
 		require.Equal(t, "kyle", user.Username)
 		require.Equal(t, "/hello-world", user.AvatarURL)
+
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
 	})
 	t.Run("SignupAllowedTeam", func(t *testing.T) {
 		t.Parallel()
+		auditor := audit.NewMock()
 		client := coderdtest.New(t, &coderdtest.Options{
+			Auditor: auditor,
 			GithubOAuth2Config: &coderd.GithubOAuth2Config{
 				AllowSignups:       true,
 				AllowOrganizations: []string{"coder"},
@@ -315,12 +369,162 @@ func TestUserOAuth2Github(t *testing.T) {
 				},
 			},
 		})
+		numLogs := len(auditor.AuditLogs)
+
 		resp := oauth2Callback(t, client)
+		numLogs++ // add an audit log for login
+
 		require.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
+	})
+	t.Run("SignupAllowedTeamInFirstOrganization", func(t *testing.T) {
+		t.Parallel()
+		auditor := audit.NewMock()
+		client := coderdtest.New(t, &coderdtest.Options{
+			Auditor: auditor,
+			GithubOAuth2Config: &coderd.GithubOAuth2Config{
+				AllowSignups:       true,
+				AllowOrganizations: []string{"coder", "nil"},
+				AllowTeams:         []coderd.GithubOAuth2Team{{"coder", "backend"}},
+				OAuth2Config:       &oauth2Config{},
+				ListOrganizationMemberships: func(ctx context.Context, client *http.Client) ([]*github.Membership, error) {
+					return []*github.Membership{
+						{
+							State: &stateActive,
+							Organization: &github.Organization{
+								Login: github.String("coder"),
+							},
+						},
+						{
+							State: &stateActive,
+							Organization: &github.Organization{
+								Login: github.String("nil"),
+							},
+						},
+					}, nil
+				},
+				TeamMembership: func(ctx context.Context, client *http.Client, org, team, username string) (*github.Membership, error) {
+					return &github.Membership{}, nil
+				},
+				AuthenticatedUser: func(ctx context.Context, client *http.Client) (*github.User, error) {
+					return &github.User{
+						Login: github.String("mathias"),
+					}, nil
+				},
+				ListEmails: func(ctx context.Context, client *http.Client) ([]*github.UserEmail, error) {
+					return []*github.UserEmail{{
+						Email:    github.String("mathias@coder.com"),
+						Verified: github.Bool(true),
+						Primary:  github.Bool(true),
+					}}, nil
+				},
+			},
+		})
+		numLogs := len(auditor.AuditLogs)
+
+		resp := oauth2Callback(t, client)
+		numLogs++ // add an audit log for login
+
+		require.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
+	})
+	t.Run("SignupAllowedTeamInSecondOrganization", func(t *testing.T) {
+		t.Parallel()
+		auditor := audit.NewMock()
+		client := coderdtest.New(t, &coderdtest.Options{
+			Auditor: auditor,
+			GithubOAuth2Config: &coderd.GithubOAuth2Config{
+				AllowSignups:       true,
+				AllowOrganizations: []string{"coder", "nil"},
+				AllowTeams:         []coderd.GithubOAuth2Team{{"nil", "null"}},
+				OAuth2Config:       &oauth2Config{},
+				ListOrganizationMemberships: func(ctx context.Context, client *http.Client) ([]*github.Membership, error) {
+					return []*github.Membership{
+						{
+							State: &stateActive,
+							Organization: &github.Organization{
+								Login: github.String("coder"),
+							},
+						},
+						{
+							State: &stateActive,
+							Organization: &github.Organization{
+								Login: github.String("nil"),
+							},
+						},
+					}, nil
+				},
+				TeamMembership: func(ctx context.Context, client *http.Client, org, team, username string) (*github.Membership, error) {
+					return &github.Membership{}, nil
+				},
+				AuthenticatedUser: func(ctx context.Context, client *http.Client) (*github.User, error) {
+					return &github.User{
+						Login: github.String("mathias"),
+					}, nil
+				},
+				ListEmails: func(ctx context.Context, client *http.Client) ([]*github.UserEmail, error) {
+					return []*github.UserEmail{{
+						Email:    github.String("mathias@coder.com"),
+						Verified: github.Bool(true),
+						Primary:  github.Bool(true),
+					}}, nil
+				},
+			},
+		})
+		numLogs := len(auditor.AuditLogs)
+
+		resp := oauth2Callback(t, client)
+		numLogs++ // add an audit log for login
+
+		require.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
+	})
+	t.Run("SignupAllowEveryone", func(t *testing.T) {
+		t.Parallel()
+		auditor := audit.NewMock()
+		client := coderdtest.New(t, &coderdtest.Options{
+			Auditor: auditor,
+			GithubOAuth2Config: &coderd.GithubOAuth2Config{
+				AllowSignups:  true,
+				AllowEveryone: true,
+				OAuth2Config:  &oauth2Config{},
+				ListOrganizationMemberships: func(ctx context.Context, client *http.Client) ([]*github.Membership, error) {
+					return []*github.Membership{}, nil
+				},
+				TeamMembership: func(ctx context.Context, client *http.Client, org, team, username string) (*github.Membership, error) {
+					return nil, xerrors.New("no teams")
+				},
+				AuthenticatedUser: func(ctx context.Context, client *http.Client) (*github.User, error) {
+					return &github.User{
+						Login: github.String("mathias"),
+					}, nil
+				},
+				ListEmails: func(ctx context.Context, client *http.Client) ([]*github.UserEmail, error) {
+					return []*github.UserEmail{{
+						Email:    github.String("mathias@coder.com"),
+						Verified: github.Bool(true),
+						Primary:  github.Bool(true),
+					}}, nil
+				},
+			},
+		})
+		numLogs := len(auditor.AuditLogs)
+
+		resp := oauth2Callback(t, client)
+		numLogs++ // add an audit log for login
+
+		require.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
 	})
 	t.Run("SignupFailedInactiveInOrg", func(t *testing.T) {
 		t.Parallel()
+		auditor := audit.NewMock()
 		client := coderdtest.New(t, &coderdtest.Options{
+			Auditor: auditor,
 			GithubOAuth2Config: &coderd.GithubOAuth2Config{
 				AllowSignups:       true,
 				AllowOrganizations: []string{"coder"},
@@ -351,8 +555,14 @@ func TestUserOAuth2Github(t *testing.T) {
 				},
 			},
 		})
+		numLogs := len(auditor.AuditLogs)
+
 		resp := oauth2Callback(t, client)
+		numLogs++ // add an audit log for login
+
 		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
 	})
 }
 
@@ -361,16 +571,18 @@ func TestUserOIDC(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		Name         string
-		Claims       jwt.MapClaims
-		AllowSignups bool
-		EmailDomain  string
-		Username     string
-		AvatarURL    string
-		StatusCode   int
+		Name                string
+		IDTokenClaims       jwt.MapClaims
+		UserInfoClaims      jwt.MapClaims
+		AllowSignups        bool
+		EmailDomain         []string
+		Username            string
+		AvatarURL           string
+		StatusCode          int
+		IgnoreEmailVerified bool
 	}{{
 		Name: "EmailOnly",
-		Claims: jwt.MapClaims{
+		IDTokenClaims: jwt.MapClaims{
 			"email": "kyle@kwc.io",
 		},
 		AllowSignups: true,
@@ -378,45 +590,67 @@ func TestUserOIDC(t *testing.T) {
 		Username:     "kyle",
 	}, {
 		Name: "EmailNotVerified",
-		Claims: jwt.MapClaims{
+		IDTokenClaims: jwt.MapClaims{
 			"email":          "kyle@kwc.io",
 			"email_verified": false,
 		},
 		AllowSignups: true,
 		StatusCode:   http.StatusForbidden,
 	}, {
+		Name: "EmailNotAString",
+		IDTokenClaims: jwt.MapClaims{
+			"email":          3.14159,
+			"email_verified": false,
+		},
+		AllowSignups: true,
+		StatusCode:   http.StatusBadRequest,
+	}, {
+		Name: "EmailNotVerifiedIgnored",
+		IDTokenClaims: jwt.MapClaims{
+			"email":          "kyle@kwc.io",
+			"email_verified": false,
+		},
+		AllowSignups:        true,
+		StatusCode:          http.StatusTemporaryRedirect,
+		Username:            "kyle",
+		IgnoreEmailVerified: true,
+	}, {
 		Name: "NotInRequiredEmailDomain",
-		Claims: jwt.MapClaims{
+		IDTokenClaims: jwt.MapClaims{
 			"email":          "kyle@kwc.io",
 			"email_verified": true,
 		},
 		AllowSignups: true,
-		EmailDomain:  "coder.com",
-		StatusCode:   http.StatusForbidden,
+		EmailDomain: []string{
+			"coder.com",
+		},
+		StatusCode: http.StatusForbidden,
 	}, {
 		Name: "EmailDomainCaseInsensitive",
-		Claims: jwt.MapClaims{
+		IDTokenClaims: jwt.MapClaims{
 			"email":          "kyle@KWC.io",
 			"email_verified": true,
 		},
 		AllowSignups: true,
-		EmailDomain:  "kwc.io",
-		StatusCode:   http.StatusTemporaryRedirect,
+		EmailDomain: []string{
+			"kwc.io",
+		},
+		StatusCode: http.StatusTemporaryRedirect,
 	}, {
-		Name:         "EmptyClaims",
-		Claims:       jwt.MapClaims{},
-		AllowSignups: true,
-		StatusCode:   http.StatusBadRequest,
+		Name:          "EmptyClaims",
+		IDTokenClaims: jwt.MapClaims{},
+		AllowSignups:  true,
+		StatusCode:    http.StatusBadRequest,
 	}, {
 		Name: "NoSignups",
-		Claims: jwt.MapClaims{
+		IDTokenClaims: jwt.MapClaims{
 			"email":          "kyle@kwc.io",
 			"email_verified": true,
 		},
 		StatusCode: http.StatusForbidden,
 	}, {
 		Name: "UsernameFromEmail",
-		Claims: jwt.MapClaims{
+		IDTokenClaims: jwt.MapClaims{
 			"email":          "kyle@kwc.io",
 			"email_verified": true,
 		},
@@ -425,7 +659,7 @@ func TestUserOIDC(t *testing.T) {
 		StatusCode:   http.StatusTemporaryRedirect,
 	}, {
 		Name: "UsernameFromClaims",
-		Claims: jwt.MapClaims{
+		IDTokenClaims: jwt.MapClaims{
 			"email":              "kyle@kwc.io",
 			"email_verified":     true,
 			"preferred_username": "hotdog",
@@ -437,7 +671,7 @@ func TestUserOIDC(t *testing.T) {
 		// Services like Okta return the email as the username:
 		// https://developer.okta.com/docs/reference/api/oidc/#base-claims-always-present
 		Name: "UsernameAsEmail",
-		Claims: jwt.MapClaims{
+		IDTokenClaims: jwt.MapClaims{
 			"email":              "kyle@kwc.io",
 			"email_verified":     true,
 			"preferred_username": "kyle@kwc.io",
@@ -448,7 +682,7 @@ func TestUserOIDC(t *testing.T) {
 	}, {
 		// See: https://github.com/coder/coder/issues/4472
 		Name: "UsernameIsEmail",
-		Claims: jwt.MapClaims{
+		IDTokenClaims: jwt.MapClaims{
 			"preferred_username": "kyle@kwc.io",
 		},
 		Username:     "kyle",
@@ -456,30 +690,58 @@ func TestUserOIDC(t *testing.T) {
 		StatusCode:   http.StatusTemporaryRedirect,
 	}, {
 		Name: "WithPicture",
-		Claims: jwt.MapClaims{
-			"email":          "kyle@kwc.io",
-			"email_verified": true,
-			"username":       "kyle",
-			"picture":        "/example.png",
+		IDTokenClaims: jwt.MapClaims{
+			"email":              "kyle@kwc.io",
+			"email_verified":     true,
+			"preferred_username": "kyle",
+			"picture":            "/example.png",
 		},
 		Username:     "kyle",
 		AllowSignups: true,
 		AvatarURL:    "/example.png",
 		StatusCode:   http.StatusTemporaryRedirect,
+	}, {
+		Name: "WithUserInfoClaims",
+		IDTokenClaims: jwt.MapClaims{
+			"email":          "kyle@kwc.io",
+			"email_verified": true,
+		},
+		UserInfoClaims: jwt.MapClaims{
+			"preferred_username": "potato",
+			"picture":            "/example.png",
+		},
+		Username:     "potato",
+		AllowSignups: true,
+		AvatarURL:    "/example.png",
+		StatusCode:   http.StatusTemporaryRedirect,
+	}, {
+		Name: "GroupsDoesNothing",
+		IDTokenClaims: jwt.MapClaims{
+			"email":  "coolin@coder.com",
+			"groups": []string{"pingpong"},
+		},
+		AllowSignups: true,
+		StatusCode:   http.StatusTemporaryRedirect,
 	}} {
 		tc := tc
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
+			auditor := audit.NewMock()
 			conf := coderdtest.NewOIDCConfig(t, "")
 
-			config := conf.OIDCConfig()
+			config := conf.OIDCConfig(t, tc.UserInfoClaims)
 			config.AllowSignups = tc.AllowSignups
 			config.EmailDomain = tc.EmailDomain
+			config.IgnoreEmailVerified = tc.IgnoreEmailVerified
 
 			client := coderdtest.New(t, &coderdtest.Options{
+				Auditor:    auditor,
 				OIDCConfig: config,
 			})
-			resp := oidcCallback(t, client, conf.EncodeClaims(t, tc.Claims))
+			numLogs := len(auditor.AuditLogs)
+
+			resp := oidcCallback(t, client, conf.EncodeClaims(t, tc.IDTokenClaims))
+			numLogs++ // add an audit log for login
 			assert.Equal(t, tc.StatusCode, resp.StatusCode)
 
 			ctx, _ := testutil.Context(t)
@@ -489,6 +751,9 @@ func TestUserOIDC(t *testing.T) {
 				user, err := client.User(ctx, "me")
 				require.NoError(t, err)
 				require.Equal(t, tc.Username, user.Username)
+
+				require.Len(t, auditor.AuditLogs, numLogs)
+				require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
 			}
 
 			if tc.AvatarURL != "" {
@@ -496,26 +761,33 @@ func TestUserOIDC(t *testing.T) {
 				user, err := client.User(ctx, "me")
 				require.NoError(t, err)
 				require.Equal(t, tc.AvatarURL, user.AvatarURL)
+
+				require.Len(t, auditor.AuditLogs, numLogs)
+				require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
 			}
 		})
 	}
 
 	t.Run("AlternateUsername", func(t *testing.T) {
 		t.Parallel()
-
+		auditor := audit.NewMock()
 		conf := coderdtest.NewOIDCConfig(t, "")
 
-		config := conf.OIDCConfig()
+		config := conf.OIDCConfig(t, nil)
 		config.AllowSignups = true
 
 		client := coderdtest.New(t, &coderdtest.Options{
+			Auditor:    auditor,
 			OIDCConfig: config,
 		})
+		numLogs := len(auditor.AuditLogs)
 
 		code := conf.EncodeClaims(t, jwt.MapClaims{
 			"email": "jon@coder.com",
 		})
 		resp := oidcCallback(t, client, code)
+		numLogs++ // add an audit log for login
+
 		assert.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
 
 		ctx, _ := testutil.Context(t)
@@ -532,39 +804,55 @@ func TestUserOIDC(t *testing.T) {
 			"sub":   "diff",
 		})
 		resp = oidcCallback(t, client, code)
+		numLogs++ // add an audit log for login
+
 		assert.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
 
 		client.SetSessionToken(authCookieValue(resp.Cookies()))
 		user, err = client.User(ctx, "me")
 		require.NoError(t, err)
 		require.True(t, strings.HasPrefix(user.Username, "jon-"), "username %q should have prefix %q", user.Username, "jon-")
+
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
 	})
 
 	t.Run("Disabled", func(t *testing.T) {
 		t.Parallel()
 		client := coderdtest.New(t, nil)
 		resp := oidcCallback(t, client, "asdf")
-		require.Equal(t, http.StatusPreconditionRequired, resp.StatusCode)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	})
 
 	t.Run("NoIDToken", func(t *testing.T) {
 		t.Parallel()
+		auditor := audit.NewMock()
 		client := coderdtest.New(t, &coderdtest.Options{
+			Auditor: auditor,
 			OIDCConfig: &coderd.OIDCConfig{
 				OAuth2Config: &oauth2Config{},
 			},
 		})
+		numLogs := len(auditor.AuditLogs)
+
 		resp := oidcCallback(t, client, "asdf")
+		numLogs++ // add an audit log for login
+
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
 	})
 
 	t.Run("BadVerify", func(t *testing.T) {
 		t.Parallel()
+		auditor := audit.NewMock()
 		verifier := oidc.NewVerifier("", &oidc.StaticKeySet{
 			PublicKeys: []crypto.PublicKey{},
 		}, &oidc.Config{})
+		provider := &oidc.Provider{}
 
 		client := coderdtest.New(t, &coderdtest.Options{
+			Auditor: auditor,
 			OIDCConfig: &coderd.OIDCConfig{
 				OAuth2Config: &oauth2Config{
 					token: (&oauth2.Token{
@@ -573,11 +861,18 @@ func TestUserOIDC(t *testing.T) {
 						"id_token": "invalid",
 					}),
 				},
+				Provider: provider,
 				Verifier: verifier,
 			},
 		})
+		numLogs := len(auditor.AuditLogs)
+
 		resp := oidcCallback(t, client, "asdf")
+		numLogs++ // add an audit log for login
+
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
 	})
 }
 
@@ -592,7 +887,7 @@ func oauth2Callback(t *testing.T, client *codersdk.Client) *http.Response {
 	req, err := http.NewRequestWithContext(context.Background(), "GET", oauthURL.String(), nil)
 	require.NoError(t, err)
 	req.AddCookie(&http.Cookie{
-		Name:  codersdk.OAuth2StateKey,
+		Name:  codersdk.OAuth2StateCookie,
 		Value: state,
 	})
 	res, err := client.HTTPClient.Do(req)
@@ -613,7 +908,7 @@ func oidcCallback(t *testing.T, client *codersdk.Client, code string) *http.Resp
 	req, err := http.NewRequestWithContext(context.Background(), "GET", oauthURL.String(), nil)
 	require.NoError(t, err)
 	req.AddCookie(&http.Cookie{
-		Name:  codersdk.OAuth2StateKey,
+		Name:  codersdk.OAuth2StateCookie,
 		Value: "somestate",
 	})
 	res, err := client.HTTPClient.Do(req)
@@ -631,7 +926,7 @@ func i64ptr(i int64) *int64 {
 
 func authCookieValue(cookies []*http.Cookie) string {
 	for _, cookie := range cookies {
-		if cookie.Name == codersdk.SessionTokenKey {
+		if cookie.Name == codersdk.SessionTokenCookie {
 			return cookie.Value
 		}
 	}

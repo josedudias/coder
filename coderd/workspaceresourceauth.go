@@ -10,18 +10,30 @@ import (
 	"github.com/coder/coder/coderd/awsidentity"
 	"github.com/coder/coder/coderd/azureidentity"
 	"github.com/coder/coder/coderd/database"
+	"github.com/coder/coder/coderd/database/dbauthz"
 	"github.com/coder/coder/coderd/httpapi"
 	"github.com/coder/coder/coderd/provisionerdserver"
 	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/codersdk/agentsdk"
 
 	"github.com/mitchellh/mapstructure"
 )
 
 // Azure supports instance identity verification:
 // https://docs.microsoft.com/en-us/azure/virtual-machines/windows/instance-metadata-service?tabs=linux#tabgroup_14
+//
+// @Summary Authenticate agent on Azure instance
+// @ID authenticate-agent-on-azure-instance
+// @Security CoderSessionToken
+// @Accept json
+// @Produce json
+// @Tags Agents
+// @Param request body agentsdk.AzureInstanceIdentityToken true "Instance identity token"
+// @Success 200 {object} agentsdk.AuthenticateResponse
+// @Router /workspaceagents/azure-instance-identity [post]
 func (api *API) postWorkspaceAuthAzureInstanceIdentity(rw http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	var req codersdk.AzureInstanceIdentityToken
+	var req agentsdk.AzureInstanceIdentityToken
 	if !httpapi.Read(ctx, rw, r, &req) {
 		return
 	}
@@ -39,9 +51,19 @@ func (api *API) postWorkspaceAuthAzureInstanceIdentity(rw http.ResponseWriter, r
 // AWS supports instance identity verification:
 // https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instance-identity-documents.html
 // Using this, we can exchange a signed instance payload for an agent token.
+//
+// @Summary Authenticate agent on AWS instance
+// @ID authenticate-agent-on-aws-instance
+// @Security CoderSessionToken
+// @Accept json
+// @Produce json
+// @Tags Agents
+// @Param request body agentsdk.AWSInstanceIdentityToken true "Instance identity token"
+// @Success 200 {object} agentsdk.AuthenticateResponse
+// @Router /workspaceagents/aws-instance-identity [post]
 func (api *API) postWorkspaceAuthAWSInstanceIdentity(rw http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	var req codersdk.AWSInstanceIdentityToken
+	var req agentsdk.AWSInstanceIdentityToken
 	if !httpapi.Read(ctx, rw, r, &req) {
 		return
 	}
@@ -59,9 +81,19 @@ func (api *API) postWorkspaceAuthAWSInstanceIdentity(rw http.ResponseWriter, r *
 // Google Compute Engine supports instance identity verification:
 // https://cloud.google.com/compute/docs/instances/verifying-instance-identity
 // Using this, we can exchange a signed instance payload for an agent token.
+//
+// @Summary Authenticate agent on Google Cloud instance
+// @ID authenticate-agent-on-google-cloud-instance
+// @Security CoderSessionToken
+// @Accept json
+// @Produce json
+// @Tags Agents
+// @Param request body agentsdk.GoogleInstanceIdentityToken true "Instance identity token"
+// @Success 200 {object} agentsdk.AuthenticateResponse
+// @Router /workspaceagents/google-instance-identity [post]
 func (api *API) postWorkspaceAuthGoogleInstanceIdentity(rw http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	var req codersdk.GoogleInstanceIdentityToken
+	var req agentsdk.GoogleInstanceIdentityToken
 	if !httpapi.Read(ctx, rw, r, &req) {
 		return
 	}
@@ -95,7 +127,8 @@ func (api *API) postWorkspaceAuthGoogleInstanceIdentity(rw http.ResponseWriter, 
 
 func (api *API) handleAuthInstanceID(rw http.ResponseWriter, r *http.Request, instanceID string) {
 	ctx := r.Context()
-	agent, err := api.Database.GetWorkspaceAgentByInstanceID(ctx, instanceID)
+	//nolint:gocritic // needed for auth instance id
+	agent, err := api.Database.GetWorkspaceAgentByInstanceID(dbauthz.AsSystemRestricted(ctx), instanceID)
 	if errors.Is(err, sql.ErrNoRows) {
 		httpapi.Write(ctx, rw, http.StatusNotFound, codersdk.Response{
 			Message: fmt.Sprintf("Instance with id %q not found.", instanceID),
@@ -109,7 +142,8 @@ func (api *API) handleAuthInstanceID(rw http.ResponseWriter, r *http.Request, in
 		})
 		return
 	}
-	resource, err := api.Database.GetWorkspaceResourceByID(ctx, agent.ResourceID)
+	//nolint:gocritic // needed for auth instance id
+	resource, err := api.Database.GetWorkspaceResourceByID(dbauthz.AsSystemRestricted(ctx), agent.ResourceID)
 	if err != nil {
 		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
 			Message: "Internal error fetching provisioner job resource.",
@@ -117,7 +151,8 @@ func (api *API) handleAuthInstanceID(rw http.ResponseWriter, r *http.Request, in
 		})
 		return
 	}
-	job, err := api.Database.GetProvisionerJobByID(ctx, resource.JobID)
+	//nolint:gocritic // needed for auth instance id
+	job, err := api.Database.GetProvisionerJobByID(dbauthz.AsSystemRestricted(ctx), resource.JobID)
 	if err != nil {
 		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
 			Message: "Internal error fetching provisioner job.",
@@ -140,7 +175,8 @@ func (api *API) handleAuthInstanceID(rw http.ResponseWriter, r *http.Request, in
 		})
 		return
 	}
-	resourceHistory, err := api.Database.GetWorkspaceBuildByID(ctx, jobData.WorkspaceBuildID)
+	//nolint:gocritic // needed for auth instance id
+	resourceHistory, err := api.Database.GetWorkspaceBuildByID(dbauthz.AsSystemRestricted(ctx), jobData.WorkspaceBuildID)
 	if err != nil {
 		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
 			Message: "Internal error fetching workspace build.",
@@ -151,7 +187,8 @@ func (api *API) handleAuthInstanceID(rw http.ResponseWriter, r *http.Request, in
 	// This token should only be exchanged if the instance ID is valid
 	// for the latest history. If an instance ID is recycled by a cloud,
 	// we'd hate to leak access to a user's workspace.
-	latestHistory, err := api.Database.GetLatestWorkspaceBuildByWorkspaceID(ctx, resourceHistory.WorkspaceID)
+	//nolint:gocritic // needed for auth instance id
+	latestHistory, err := api.Database.GetLatestWorkspaceBuildByWorkspaceID(dbauthz.AsSystemRestricted(ctx), resourceHistory.WorkspaceID)
 	if err != nil {
 		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
 			Message: "Internal error fetching the latest workspace build.",
@@ -166,7 +203,7 @@ func (api *API) handleAuthInstanceID(rw http.ResponseWriter, r *http.Request, in
 		return
 	}
 
-	httpapi.Write(ctx, rw, http.StatusOK, codersdk.WorkspaceAgentAuthenticateResponse{
+	httpapi.Write(ctx, rw, http.StatusOK, agentsdk.AuthenticateResponse{
 		SessionToken: agent.AuthToken.String(),
 	})
 }

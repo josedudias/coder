@@ -12,20 +12,29 @@ INSERT INTO
 VALUES
 	($1, $2, $3, $4, $5, $6, $7) RETURNING *;
 
--- name: GetLatestAgentStat :one
-SELECT * FROM agent_stats WHERE agent_id = $1 ORDER BY created_at DESC LIMIT 1; 
-
 -- name: GetTemplateDAUs :many
-select
+SELECT
 	(created_at at TIME ZONE 'UTC')::date as date,
 	user_id
-from
+FROM
 	agent_stats
-where template_id = $1
-group by
+WHERE
+	template_id = $1
+GROUP BY
 	date, user_id
-order by
-	date asc;
+ORDER BY
+	date ASC;
+
+-- name: GetDeploymentDAUs :many
+SELECT
+	(created_at at TIME ZONE 'UTC')::date as date,
+	user_id
+FROM
+	agent_stats
+GROUP BY
+	date, user_id
+ORDER BY
+	date ASC;
 
 -- name: DeleteOldAgentStats :exec
-DELETE FROM AGENT_STATS WHERE created_at  < now() - interval '30 days';
+DELETE FROM agent_stats WHERE created_at < NOW() - INTERVAL '30 days';

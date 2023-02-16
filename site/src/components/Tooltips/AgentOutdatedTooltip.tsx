@@ -1,25 +1,88 @@
-import { FC } from "react"
-import { HelpTooltip, HelpTooltipText, HelpTooltipTitle } from "./HelpTooltip"
+import { ComponentProps, FC } from "react"
+import { makeStyles } from "@material-ui/core/styles"
+import RefreshIcon from "@material-ui/icons/RefreshOutlined"
+import {
+  HelpTooltipText,
+  HelpPopover,
+  HelpTooltipTitle,
+  HelpTooltipAction,
+  HelpTooltipLinksGroup,
+  HelpTooltipContext,
+} from "components/Tooltips/HelpTooltip"
+import { WorkspaceAgent } from "api/typesGenerated"
+import { Stack } from "components/Stack/Stack"
+import { useTranslation } from "react-i18next"
 
-export const Language = {
-  label: "Agent Outdated",
-  text: "This agent is an older version than the Coder server. This can happen after you update Coder with running workspaces. To fix this, you can stop and start the workspace.",
+type AgentOutdatedTooltipProps = ComponentProps<typeof HelpPopover> & {
+  agent: WorkspaceAgent
+  serverVersion: string
+  onUpdate: () => void
 }
 
-interface TooltipProps {
-  outdated: boolean
-}
+export const AgentOutdatedTooltip: FC<AgentOutdatedTooltipProps> = ({
+  agent,
+  serverVersion,
+  onUpdate,
+  onOpen,
+  id,
+  open,
+  onClose,
+  anchorEl,
+}) => {
+  const styles = useStyles()
+  const { t } = useTranslation("workspacePage")
 
-export const AgentOutdatedTooltip: FC<
-  React.PropsWithChildren<TooltipProps>
-> = ({ outdated }) => {
-  if (!outdated) {
-    return null
-  }
   return (
-    <HelpTooltip size="small">
-      <HelpTooltipTitle>{Language.label}</HelpTooltipTitle>
-      <HelpTooltipText>{Language.text}</HelpTooltipText>
-    </HelpTooltip>
+    <HelpPopover
+      id={id}
+      open={open}
+      anchorEl={anchorEl}
+      onOpen={onOpen}
+      onClose={onClose}
+    >
+      <HelpTooltipContext.Provider value={{ open, onClose }}>
+        <Stack spacing={1}>
+          <div>
+            <HelpTooltipTitle>
+              {t("agentOutdatedTooltip.title")}
+            </HelpTooltipTitle>
+            <HelpTooltipText>
+              {t("agentOutdatedTooltip.description")}
+            </HelpTooltipText>
+          </div>
+
+          <Stack spacing={0.5}>
+            <span className={styles.versionLabel}>
+              {t("agentOutdatedTooltip.agentVersionLabel")}
+            </span>
+            <span>{agent.version}</span>
+          </Stack>
+
+          <Stack spacing={0.5}>
+            <span className={styles.versionLabel}>
+              {t("agentOutdatedTooltip.serverVersionLabel")}
+            </span>
+            <span>{serverVersion}</span>
+          </Stack>
+
+          <HelpTooltipLinksGroup>
+            <HelpTooltipAction
+              icon={RefreshIcon}
+              onClick={onUpdate}
+              ariaLabel="Update workspace"
+            >
+              {t("agentOutdatedTooltip.updateWorkspaceLabel")}
+            </HelpTooltipAction>
+          </HelpTooltipLinksGroup>
+        </Stack>
+      </HelpTooltipContext.Provider>
+    </HelpPopover>
   )
 }
+
+const useStyles = makeStyles((theme) => ({
+  versionLabel: {
+    fontWeight: 600,
+    color: theme.palette.text.primary,
+  },
+}))

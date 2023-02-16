@@ -16,12 +16,19 @@ import (
 	"github.com/coder/coder/codersdk"
 )
 
+// @Summary Get organization by ID
+// @ID get-organization-by-id
+// @Security CoderSessionToken
+// @Produce json
+// @Tags Organizations
+// @Param organization path string true "Organization ID" format(uuid)
+// @Success 200 {object} codersdk.Organization
+// @Router /organizations/{organization} [get]
 func (api *API) organization(rw http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	organization := httpmw.OrganizationParam(r)
 
-	if !api.Authorize(r, rbac.ActionRead, rbac.ResourceOrganization.
-		InOrg(organization.ID)) {
+	if !api.Authorize(r, rbac.ActionRead, organization) {
 		httpapi.ResourceNotFound(rw)
 		return
 	}
@@ -29,6 +36,15 @@ func (api *API) organization(rw http.ResponseWriter, r *http.Request) {
 	httpapi.Write(ctx, rw, http.StatusOK, convertOrganization(organization))
 }
 
+// @Summary Create organization
+// @ID create-organization
+// @Security CoderSessionToken
+// @Accept json
+// @Produce json
+// @Tags Organizations
+// @Param request body codersdk.CreateOrganizationRequest true "Create organization request"
+// @Success 201 {object} codersdk.Organization
+// @Router /organizations [post]
 func (api *API) postOrganizations(rw http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	apiKey := httpmw.APIKey(r)
@@ -76,7 +92,11 @@ func (api *API) postOrganizations(rw http.ResponseWriter, r *http.Request) {
 			CreatedAt:      database.Now(),
 			UpdatedAt:      database.Now(),
 			Roles: []string{
-				rbac.RoleOrgAdmin(organization.ID),
+				// TODO: When organizations are allowed to be created, we should
+				// come back to determining the default role of the person who
+				// creates the org. Until that happens, all users in an organization
+				// should be just regular members.
+				rbac.RoleOrgMember(organization.ID),
 			},
 		})
 		if err != nil {
@@ -88,7 +108,7 @@ func (api *API) postOrganizations(rw http.ResponseWriter, r *http.Request) {
 			return xerrors.Errorf("create %q group: %w", database.AllUsersGroup, err)
 		}
 		return nil
-	})
+	}, nil)
 	if err != nil {
 		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
 			Message: "Internal error inserting organization member.",

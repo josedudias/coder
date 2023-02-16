@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v4"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -62,7 +63,7 @@ func NewWithAPI(t *testing.T, options *Options) (*codersdk.Client, io.Closer, *c
 	if options.Options == nil {
 		options.Options = &coderdtest.Options{}
 	}
-	setHandler, cancelFunc, oop := coderdtest.NewOptions(t, options.Options)
+	setHandler, cancelFunc, serverURL, oop := coderdtest.NewOptions(t, options.Options)
 	coderAPI, err := coderd.New(context.Background(), &coderd.Options{
 		RBAC:                       true,
 		AuditLogging:               options.AuditLogging,
@@ -70,7 +71,6 @@ func NewWithAPI(t *testing.T, options *Options) (*codersdk.Client, io.Closer, *c
 		SCIMAPIKey:                 options.SCIMAPIKey,
 		DERPServerRelayAddress:     oop.AccessURL.String(),
 		DERPServerRegionID:         oop.DERPMap.RegionIDs()[0],
-		UserWorkspaceQuota:         options.UserWorkspaceQuota,
 		Options:                    oop,
 		EntitlementsUpdateInterval: options.EntitlementsUpdateInterval,
 		Keys:                       Keys,
@@ -87,7 +87,7 @@ func NewWithAPI(t *testing.T, options *Options) (*codersdk.Client, io.Closer, *c
 		_ = provisionerCloser.Close()
 		_ = coderAPI.Close()
 	})
-	client := codersdk.New(coderAPI.AccessURL)
+	client := codersdk.New(serverURL)
 	client.HTTPClient = &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
@@ -100,20 +100,13 @@ func NewWithAPI(t *testing.T, options *Options) (*codersdk.Client, io.Closer, *c
 }
 
 type LicenseOptions struct {
-	AccountType      string
-	AccountID        string
-	Trial            bool
-	AllFeatures      bool
-	GraceAt          time.Time
-	ExpiresAt        time.Time
-	UserLimit        int64
-	AuditLog         bool
-	BrowserOnly      bool
-	SCIM             bool
-	WorkspaceQuota   bool
-	TemplateRBAC     bool
-	HighAvailability bool
-	MultipleGitAuth  bool
+	AccountType string
+	AccountID   string
+	Trial       bool
+	AllFeatures bool
+	GraceAt     time.Time
+	ExpiresAt   time.Time
+	Features    license.Features
 }
 
 // AddLicense generates a new license with the options provided and inserts it.
@@ -133,39 +126,10 @@ func GenerateLicense(t *testing.T, options LicenseOptions) string {
 	if options.GraceAt.IsZero() {
 		options.GraceAt = time.Now().Add(time.Hour)
 	}
-	var auditLog int64
-	if options.AuditLog {
-		auditLog = 1
-	}
-	var browserOnly int64
-	if options.BrowserOnly {
-		browserOnly = 1
-	}
-	var scim int64
-	if options.SCIM {
-		scim = 1
-	}
-	var workspaceQuota int64
-	if options.WorkspaceQuota {
-		workspaceQuota = 1
-	}
-	highAvailability := int64(0)
-	if options.HighAvailability {
-		highAvailability = 1
-	}
-
-	rbacEnabled := int64(0)
-	if options.TemplateRBAC {
-		rbacEnabled = 1
-	}
-
-	multipleGitAuth := int64(0)
-	if options.MultipleGitAuth {
-		multipleGitAuth = 1
-	}
 
 	c := &license.Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        uuid.NewString(),
 			Issuer:    "test@testing.test",
 			ExpiresAt: jwt.NewNumericDate(options.ExpiresAt),
 			NotBefore: jwt.NewNumericDate(time.Now().Add(-time.Minute)),
@@ -177,16 +141,7 @@ func GenerateLicense(t *testing.T, options LicenseOptions) string {
 		Trial:          options.Trial,
 		Version:        license.CurrentVersion,
 		AllFeatures:    options.AllFeatures,
-		Features: license.Features{
-			UserLimit:        options.UserLimit,
-			AuditLog:         auditLog,
-			BrowserOnly:      browserOnly,
-			SCIM:             scim,
-			WorkspaceQuota:   workspaceQuota,
-			HighAvailability: highAvailability,
-			TemplateRBAC:     rbacEnabled,
-			MultipleGitAuth:  multipleGitAuth,
-		},
+		Features:       options.Features,
 	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodEdDSA, c)
 	tok.Header[license.HeaderKeyID] = testKeyID

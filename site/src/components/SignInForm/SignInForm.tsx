@@ -1,29 +1,15 @@
-import Box from "@material-ui/core/Box"
-import Button from "@material-ui/core/Button"
-import Link from "@material-ui/core/Link"
 import { makeStyles } from "@material-ui/core/styles"
-import TextField from "@material-ui/core/TextField"
-import GitHubIcon from "@material-ui/icons/GitHub"
-import KeyIcon from "@material-ui/icons/VpnKey"
-import { Stack } from "components/Stack/Stack"
-import { FormikContextType, FormikTouched, useFormik } from "formik"
-import { FC } from "react"
-import * as Yup from "yup"
+import { FormikTouched } from "formik"
+import { FC, useState } from "react"
 import { AuthMethods } from "../../api/typesGenerated"
-import { getFormHelpers, onChangeTrimmed } from "../../util/formUtils"
-import { Welcome } from "../Welcome/Welcome"
-import { LoadingButton } from "./../LoadingButton/LoadingButton"
+import { useTranslation } from "react-i18next"
+import { Maybe } from "../Conditionals/Maybe"
+import { PasswordSignInForm } from "./PasswordSignInForm"
+import { OAuthSignInForm } from "./OAuthSignInForm"
+import { BuiltInAuthFormValues } from "./SignInForm.types"
+import Button from "@material-ui/core/Button"
+import EmailIcon from "@material-ui/icons/EmailOutlined"
 import { AlertBanner } from "components/AlertBanner/AlertBanner"
-
-/**
- * BuiltInAuthFormValues describes a form using built-in (email/password)
- * authentication. This form may not always be present depending on external
- * auth providers available and administrative configurations
- */
-interface BuiltInAuthFormValues {
-  email: string
-  password: string
-}
 
 export enum LoginErrors {
   AUTH_ERROR = "authError",
@@ -48,18 +34,20 @@ export const Language = {
   oidcSignIn: "OpenID Connect",
 }
 
-const validationSchema = Yup.object({
-  email: Yup.string()
-    .trim()
-    .email(Language.emailInvalid)
-    .required(Language.emailRequired),
-  password: Yup.string(),
-})
-
 const useStyles = makeStyles((theme) => ({
-  buttonIcon: {
-    width: 14,
-    height: 14,
+  root: {
+    width: "100%",
+  },
+  title: {
+    fontSize: theme.spacing(4),
+    fontWeight: 400,
+    margin: 0,
+    marginBottom: theme.spacing(4),
+    lineHeight: 1,
+
+    "& strong": {
+      fontWeight: 600,
+    },
   },
   divider: {
     paddingTop: theme.spacing(3),
@@ -80,6 +68,10 @@ const useStyles = makeStyles((theme) => ({
     fontSize: 12,
     letterSpacing: 1,
   },
+  icon: {
+    width: theme.spacing(2),
+    height: theme.spacing(2),
+  },
 }))
 
 export interface SignInFormProps {
@@ -87,13 +79,7 @@ export interface SignInFormProps {
   redirectTo: string
   loginErrors: Partial<Record<LoginErrors, Error | unknown>>
   authMethods?: AuthMethods
-  onSubmit: ({
-    email,
-    password,
-  }: {
-    email: string
-    password: string
-  }) => Promise<void>
+  onSubmit: (credentials: { email: string; password: string }) => void
   // initialTouched is only used for testing the error state of the form.
   initialTouched?: FormikTouched<BuiltInAuthFormValues>
 }
@@ -106,124 +92,70 @@ export const SignInForm: FC<React.PropsWithChildren<SignInFormProps>> = ({
   onSubmit,
   initialTouched,
 }) => {
+  const oAuthEnabled = Boolean(
+    authMethods?.github.enabled || authMethods?.oidc.enabled,
+  )
+  const passwordEnabled = authMethods?.password.enabled ?? true
+
+  // Hide password auth by default if any OAuth method is enabled
+  const [showPasswordAuth, setShowPasswordAuth] = useState(!oAuthEnabled)
   const styles = useStyles()
 
-  const form: FormikContextType<BuiltInAuthFormValues> =
-    useFormik<BuiltInAuthFormValues>({
-      initialValues: {
-        email: "",
-        password: "",
-      },
-      validationSchema,
-      // The email field has an autoFocus, but users may login with a button click.
-      // This is set to `false` in order to keep the autoFocus, validateOnChange
-      // and Formik experience friendly. Validation will kick in onChange (any
-      // field), or after a submission attempt.
-      validateOnBlur: false,
-      onSubmit,
-      initialTouched,
-    })
-  const getFieldHelpers = getFormHelpers<BuiltInAuthFormValues>(
-    form,
-    loginErrors.authError,
-  )
+  const commonTranslation = useTranslation("common")
+  const loginPageTranslation = useTranslation("loginPage")
 
   return (
-    <>
-      <Welcome />
-      <form onSubmit={form.handleSubmit}>
-        <Stack>
-          {Object.keys(loginErrors).map(
-            (errorKey: string) =>
-              Boolean(loginErrors[errorKey as LoginErrors]) && (
-                <AlertBanner
-                  key={errorKey}
-                  severity="error"
-                  error={loginErrors[errorKey as LoginErrors]}
-                  text={Language.errorMessages[errorKey as LoginErrors]}
-                />
-              ),
-          )}
-          <TextField
-            {...getFieldHelpers("email")}
-            onChange={onChangeTrimmed(form)}
-            autoFocus
-            autoComplete="email"
-            fullWidth
-            label={Language.emailLabel}
-            type="email"
-            variant="outlined"
-          />
-          <TextField
-            {...getFieldHelpers("password")}
-            autoComplete="current-password"
-            fullWidth
-            id="password"
-            label={Language.passwordLabel}
-            type="password"
-            variant="outlined"
-          />
-          <div>
-            <LoadingButton
-              loading={isLoading}
-              fullWidth
-              type="submit"
-              variant="contained"
-            >
-              {isLoading ? "" : Language.passwordSignIn}
-            </LoadingButton>
-          </div>
-        </Stack>
-      </form>
-      {(authMethods?.github || authMethods?.oidc) && (
-        <>
-          <div className={styles.divider}>
-            <div className={styles.dividerLine} />
-            <div className={styles.dividerLabel}>Or</div>
-            <div className={styles.dividerLine} />
-          </div>
+    <div className={styles.root}>
+      <h1 className={styles.title}>
+        {loginPageTranslation.t("signInTo")}{" "}
+        <strong>{commonTranslation.t("coder")}</strong>
+      </h1>
+      <Maybe condition={passwordEnabled && showPasswordAuth}>
+        <PasswordSignInForm
+          loginErrors={loginErrors}
+          onSubmit={onSubmit}
+          initialTouched={initialTouched}
+          isLoading={isLoading}
+        />
+      </Maybe>
+      <Maybe condition={passwordEnabled && showPasswordAuth && oAuthEnabled}>
+        <div className={styles.divider}>
+          <div className={styles.dividerLine} />
+          <div className={styles.dividerLabel}>Or</div>
+          <div className={styles.dividerLine} />
+        </div>
+      </Maybe>
+      <Maybe condition={oAuthEnabled}>
+        <OAuthSignInForm
+          isLoading={isLoading}
+          redirectTo={redirectTo}
+          authMethods={authMethods}
+        />
+      </Maybe>
 
-          <Box display="grid" gridGap="16px">
-            {authMethods.github && (
-              <Link
-                underline="none"
-                href={`/api/v2/users/oauth2/github/callback?redirect=${encodeURIComponent(
-                  redirectTo,
-                )}`}
-              >
-                <Button
-                  startIcon={<GitHubIcon className={styles.buttonIcon} />}
-                  disabled={isLoading}
-                  fullWidth
-                  type="submit"
-                  variant="contained"
-                >
-                  {Language.githubSignIn}
-                </Button>
-              </Link>
-            )}
+      <Maybe condition={!passwordEnabled && !oAuthEnabled}>
+        <AlertBanner
+          severity="error"
+          text="No authentication methods configured!"
+        />
+      </Maybe>
 
-            {authMethods.oidc && (
-              <Link
-                underline="none"
-                href={`/api/v2/users/oidc/callback?redirect=${encodeURIComponent(
-                  redirectTo,
-                )}`}
-              >
-                <Button
-                  startIcon={<KeyIcon className={styles.buttonIcon} />}
-                  disabled={isLoading}
-                  fullWidth
-                  type="submit"
-                  variant="contained"
-                >
-                  {Language.oidcSignIn}
-                </Button>
-              </Link>
-            )}
-          </Box>
-        </>
-      )}
-    </>
+      <Maybe condition={passwordEnabled && !showPasswordAuth}>
+        <div className={styles.divider}>
+          <div className={styles.dividerLine} />
+          <div className={styles.dividerLabel}>Or</div>
+          <div className={styles.dividerLine} />
+        </div>
+
+        <Button
+          fullWidth
+          onClick={() => setShowPasswordAuth(true)}
+          variant="contained"
+          startIcon={<EmailIcon className={styles.icon} />}
+        >
+          {loginPageTranslation.t("showPassword")}
+        </Button>
+      </Maybe>
+    </div>
   )
 }

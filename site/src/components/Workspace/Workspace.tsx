@@ -19,24 +19,24 @@ import { WorkspaceStats } from "../WorkspaceStats/WorkspaceStats"
 import { AlertBanner } from "../AlertBanner/AlertBanner"
 import { useTranslation } from "react-i18next"
 import {
-  EstimateTransitionTime,
+  ActiveTransition,
   WorkspaceBuildProgress,
 } from "components/WorkspaceBuildProgress/WorkspaceBuildProgress"
 import { AgentRow } from "components/Resources/AgentRow"
+import { Avatar } from "components/Avatar/Avatar"
 
 export enum WorkspaceErrors {
   GET_RESOURCES_ERROR = "getResourcesError",
   GET_BUILDS_ERROR = "getBuildsError",
   BUILD_ERROR = "buildError",
   CANCELLATION_ERROR = "cancellationError",
+  WORKSPACE_REFRESH_WARNING = "refreshWorkspaceWarning",
 }
 
 export interface WorkspaceProps {
   scheduleProps: {
     onDeadlinePlus: (hours: number) => void
     onDeadlineMinus: (hours: number) => void
-    deadlinePlusEnabled: () => boolean
-    deadlineMinusEnabled: () => boolean
     maxDeadlineIncrease: number
     maxDeadlineDecrease: number
   }
@@ -45,16 +45,21 @@ export interface WorkspaceProps {
   handleDelete: () => void
   handleUpdate: () => void
   handleCancel: () => void
+  handleChangeVersion: () => void
+  handleBuildParameters: () => void
   isUpdating: boolean
   workspace: TypesGen.Workspace
   resources?: TypesGen.WorkspaceResource[]
   builds?: TypesGen.WorkspaceBuild[]
   canUpdateWorkspace: boolean
   hideSSHButton?: boolean
+  hideVSCodeDesktopButton?: boolean
   workspaceErrors: Partial<Record<WorkspaceErrors, Error | unknown>>
   buildInfo?: TypesGen.BuildInfoResponse
   applicationsHost?: string
   template?: TypesGen.Template
+  templateParameters?: TypesGen.TemplateVersionParameter[]
+  quota_budget?: number
 }
 
 /**
@@ -67,6 +72,8 @@ export const Workspace: FC<React.PropsWithChildren<WorkspaceProps>> = ({
   handleDelete,
   handleUpdate,
   handleCancel,
+  handleChangeVersion,
+  handleBuildParameters,
   workspace,
   isUpdating,
   resources,
@@ -74,16 +81,17 @@ export const Workspace: FC<React.PropsWithChildren<WorkspaceProps>> = ({
   canUpdateWorkspace,
   workspaceErrors,
   hideSSHButton,
+  hideVSCodeDesktopButton,
   buildInfo,
   applicationsHost,
   template,
+  templateParameters,
+  quota_budget,
 }) => {
   const { t } = useTranslation("workspacePage")
   const styles = useStyles()
   const navigate = useNavigate()
   const serverVersion = buildInfo?.version || ""
-  const hasTemplateIcon =
-    workspace.template_icon && workspace.template_icon !== ""
 
   const buildError = Boolean(workspaceErrors[WorkspaceErrors.BUILD_ERROR]) && (
     <AlertBanner
@@ -104,7 +112,7 @@ export const Workspace: FC<React.PropsWithChildren<WorkspaceProps>> = ({
   )
 
   const workspaceRefreshWarning = Boolean(
-    workspaceErrors[WorkspaceErrors.GET_RESOURCES_ERROR],
+    workspaceErrors[WorkspaceErrors.WORKSPACE_REFRESH_WARNING],
   ) && (
     <AlertBanner
       severity="warning"
@@ -113,15 +121,10 @@ export const Workspace: FC<React.PropsWithChildren<WorkspaceProps>> = ({
     />
   )
 
-  let buildTimeEstimate: number | undefined = undefined
-  let isTransitioning: boolean | undefined = undefined
+  let transitionStats: TypesGen.TransitionStats | undefined = undefined
   if (template !== undefined) {
-    ;[buildTimeEstimate, isTransitioning] = EstimateTransitionTime(
-      template,
-      workspace,
-    )
+    transitionStats = ActiveTransition(template, workspace)
   }
-
   return (
     <Margins>
       <PageHeader
@@ -131,33 +134,37 @@ export const Workspace: FC<React.PropsWithChildren<WorkspaceProps>> = ({
               workspace={workspace}
               onDeadlineMinus={scheduleProps.onDeadlineMinus}
               onDeadlinePlus={scheduleProps.onDeadlinePlus}
-              deadlineMinusEnabled={scheduleProps.deadlineMinusEnabled}
-              deadlinePlusEnabled={scheduleProps.deadlinePlusEnabled}
               maxDeadlineDecrease={scheduleProps.maxDeadlineDecrease}
               maxDeadlineIncrease={scheduleProps.maxDeadlineIncrease}
               canUpdateWorkspace={canUpdateWorkspace}
             />
             <WorkspaceActions
               workspaceStatus={workspace.latest_build.status}
+              hasTemplateParameters={
+                templateParameters ? templateParameters.length > 0 : false
+              }
               isOutdated={workspace.outdated}
               handleStart={handleStart}
               handleStop={handleStop}
               handleDelete={handleDelete}
               handleUpdate={handleUpdate}
               handleCancel={handleCancel}
+              handleChangeVersion={handleChangeVersion}
+              handleBuildParameters={handleBuildParameters}
               isUpdating={isUpdating}
             />
           </Stack>
         }
       >
         <Stack direction="row" spacing={3} alignItems="center">
-          {hasTemplateIcon && (
-            <img
-              alt=""
-              src={workspace.template_icon}
-              className={styles.templateIcon}
-            />
-          )}
+          <Avatar
+            size="xl"
+            src={workspace.template_icon}
+            variant={workspace.template_icon ? "square" : undefined}
+            fitImage={Boolean(workspace.template_icon)}
+          >
+            {workspace.name}
+          </Avatar>
           <div>
             <PageHeaderTitle>
               {workspace.name}
@@ -187,12 +194,16 @@ export const Workspace: FC<React.PropsWithChildren<WorkspaceProps>> = ({
           handleClick={() => navigate(`/templates`)}
         />
 
-        <WorkspaceStats workspace={workspace} handleUpdate={handleUpdate} />
+        <WorkspaceStats
+          workspace={workspace}
+          quota_budget={quota_budget}
+          handleUpdate={handleUpdate}
+        />
 
-        {isTransitioning !== undefined && isTransitioning && (
+        {transitionStats !== undefined && (
           <WorkspaceBuildProgress
             workspace={workspace}
-            buildEstimate={buildTimeEstimate}
+            transitionStats={transitionStats}
           />
         )}
 
@@ -214,7 +225,9 @@ export const Workspace: FC<React.PropsWithChildren<WorkspaceProps>> = ({
                 applicationsHost={applicationsHost}
                 showApps={canUpdateWorkspace}
                 hideSSHButton={hideSSHButton}
+                hideVSCodeDesktopButton={hideVSCodeDesktopButton}
                 serverVersion={serverVersion}
+                onUpdateAgent={handleUpdate} // On updating the workspace the agent version is also updated
               />
             )}
           />
@@ -261,11 +274,6 @@ export const useStyles = makeStyles((theme) => {
 
     main: {
       width: "100%",
-    },
-
-    templateIcon: {
-      width: theme.spacing(6),
-      height: theme.spacing(6),
     },
 
     timelineContents: {

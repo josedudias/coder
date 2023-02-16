@@ -4,7 +4,7 @@ import { FormFooter } from "components/FormFooter/FormFooter"
 import { FullPageForm } from "components/FullPageForm/FullPageForm"
 import { Margins } from "components/Margins/Margins"
 import { useFormik } from "formik"
-import React from "react"
+import { FC } from "react"
 import { useNavigate } from "react-router-dom"
 import { getFormHelpers, nameValidator, onChangeTrimmed } from "util/formUtils"
 import * as Yup from "yup"
@@ -19,7 +19,7 @@ export type CreateGroupPageViewProps = {
   isLoading: boolean
 }
 
-export const CreateGroupPageView: React.FC<CreateGroupPageViewProps> = ({
+export const CreateGroupPageView: FC<CreateGroupPageViewProps> = ({
   onSubmit,
   formErrors,
   isLoading,
@@ -29,6 +29,7 @@ export const CreateGroupPageView: React.FC<CreateGroupPageViewProps> = ({
     initialValues: {
       name: "",
       avatar_url: "",
+      quota_allowance: 0,
     },
     validationSchema,
     onSubmit,
@@ -38,7 +39,7 @@ export const CreateGroupPageView: React.FC<CreateGroupPageViewProps> = ({
 
   return (
     <Margins>
-      <FullPageForm title="Create group" onCancel={onCancel}>
+      <FullPageForm title="Create group">
         <form onSubmit={form.handleSubmit}>
           <TextField
             {...getFieldHelpers("name")}

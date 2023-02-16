@@ -18,6 +18,14 @@ import (
 	"github.com/coder/coder/codersdk"
 )
 
+// @Summary Get template ACLs
+// @ID get-template-acls
+// @Security CoderSessionToken
+// @Produce json
+// @Tags Enterprise
+// @Param template path string true "Template ID" format(uuid)
+// @Success 200 {array} codersdk.TemplateUser
+// @Router /templates/{template}/acl [get]
 func (api *API) templateACL(rw http.ResponseWriter, r *http.Request) {
 	var (
 		ctx      = r.Context()
@@ -70,16 +78,11 @@ func (api *API) templateACL(rw http.ResponseWriter, r *http.Request) {
 	for _, group := range dbGroups {
 		var members []database.User
 
-		if group.Name == database.AllUsersGroup {
-			members, err = api.Database.GetAllOrganizationMembers(ctx, group.OrganizationID)
-		} else {
-			members, err = api.Database.GetGroupMembers(ctx, group.ID)
-		}
+		members, err = api.Database.GetGroupMembers(ctx, group.ID)
 		if err != nil {
 			httpapi.InternalServerError(rw, err)
 			return
 		}
-
 		groups = append(groups, codersdk.TemplateGroup{
 			Group: convertGroup(group.Group, members),
 			Role:  convertToTemplateRole(group.Actions),
@@ -92,6 +95,16 @@ func (api *API) templateACL(rw http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// @Summary Update template ACL
+// @ID update-template-acl
+// @Security CoderSessionToken
+// @Accept json
+// @Produce json
+// @Tags Enterprise
+// @Param template path string true "Template ID" format(uuid)
+// @Param request body codersdk.UpdateTemplateACL true "Update template request"
+// @Success 200 {object} codersdk.Response
+// @Router /templates/{template}/acl [patch]
 func (api *API) patchTemplateACL(rw http.ResponseWriter, r *http.Request) {
 	var (
 		ctx               = r.Context()
@@ -171,7 +184,7 @@ func (api *API) patchTemplateACL(rw http.ResponseWriter, r *http.Request) {
 			return xerrors.Errorf("update template ACL by ID: %w", err)
 		}
 		return nil
-	})
+	}, nil)
 	if err != nil {
 		httpapi.InternalServerError(rw, err)
 		return

@@ -12,6 +12,7 @@ import (
 	"github.com/coder/coder/coderd/util/ptr"
 	"github.com/coder/coder/codersdk"
 	"github.com/coder/coder/enterprise/coderd/coderdenttest"
+	"github.com/coder/coder/enterprise/coderd/license"
 	"github.com/coder/coder/testutil"
 )
 
@@ -26,7 +27,9 @@ func TestCreateWorkspace(t *testing.T) {
 		client := coderdenttest.New(t, nil)
 		user := coderdtest.CreateFirstUser(t, client)
 		_ = coderdenttest.AddLicense(t, client, coderdenttest.LicenseOptions{
-			TemplateRBAC: true,
+			Features: license.Features{
+				codersdk.FeatureTemplateRBAC: 1,
+			},
 		})
 
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, nil)
@@ -48,7 +51,7 @@ func TestCreateWorkspace(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		client1, user1 := coderdtest.CreateAnotherUserWithUser(t, client, user.OrganizationID)
+		client1, user1 := coderdtest.CreateAnotherUser(t, client, user.OrganizationID)
 
 		_, err = client1.Template(ctx, template.ID)
 		require.Error(t, err)

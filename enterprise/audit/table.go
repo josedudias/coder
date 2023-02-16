@@ -4,7 +4,25 @@ import (
 	"reflect"
 
 	"github.com/coder/coder/coderd/database"
+	"github.com/coder/coder/codersdk"
 )
+
+// This mapping creates a relationship between an Auditable Resource
+// and the Audit Actions we track for that resource.
+// It is important to maintain this mapping when adding a new Auditable Resource to the
+// AuditableResources map (below) as our documentation - generated in scripts/auditdocgen/main.go -
+// depends upon it.
+var AuditActionMap = map[string][]codersdk.AuditAction{
+	"GitSSHKey":       {codersdk.AuditActionCreate},
+	"Template":        {codersdk.AuditActionWrite, codersdk.AuditActionDelete},
+	"TemplateVersion": {codersdk.AuditActionCreate, codersdk.AuditActionWrite},
+	"User":            {codersdk.AuditActionCreate, codersdk.AuditActionWrite, codersdk.AuditActionDelete},
+	"Workspace":       {codersdk.AuditActionCreate, codersdk.AuditActionWrite, codersdk.AuditActionDelete},
+	"WorkspaceBuild":  {codersdk.AuditActionStart, codersdk.AuditActionStop},
+	"Group":           {codersdk.AuditActionCreate, codersdk.AuditActionWrite, codersdk.AuditActionDelete},
+	"APIKey":          {codersdk.AuditActionWrite},
+	"License":         {codersdk.AuditActionCreate, codersdk.AuditActionDelete},
+}
 
 type Action string
 
@@ -33,38 +51,25 @@ var AuditableResources = auditMap(map[any]map[string]Action{
 		"private_key": ActionSecret, // We don't want to expose private keys in diffs.
 		"public_key":  ActionTrack,  // Public keys are ok to expose in a diff.
 	},
-	&database.OrganizationMember{}: {
-		"user_id":         ActionTrack,
-		"organization_id": ActionTrack,
-		"created_at":      ActionIgnore, // Never changes, but is implicit and not helpful in a diff.
-		"updated_at":      ActionIgnore, // Changes, but is implicit and not helpful in a diff.
-		"roles":           ActionTrack,
-	},
-	&database.Organization{}: {
-		"id":          ActionTrack,
-		"name":        ActionTrack,
-		"description": ActionTrack,
-		"created_at":  ActionIgnore, // Never changes, but is implicit and not helpful in a diff.
-		"updated_at":  ActionIgnore, // Changes, but is implicit and not helpful in a diff.
-	},
 	&database.Template{}: {
-		"id":                     ActionTrack,
-		"created_at":             ActionIgnore, // Never changes, but is implicit and not helpful in a diff.
-		"updated_at":             ActionIgnore, // Changes, but is implicit and not helpful in a diff.
-		"organization_id":        ActionIgnore, /// Never changes.
-		"deleted":                ActionIgnore, // Changes, but is implicit when a delete event is fired.
-		"name":                   ActionTrack,
-		"display_name":           ActionTrack,
-		"provisioner":            ActionTrack,
-		"active_version_id":      ActionTrack,
-		"description":            ActionTrack,
-		"icon":                   ActionTrack,
-		"default_ttl":            ActionTrack,
-		"min_autostart_interval": ActionTrack,
-		"created_by":             ActionTrack,
-		"is_private":             ActionTrack,
-		"group_acl":              ActionTrack,
-		"user_acl":               ActionTrack,
+		"id":                               ActionTrack,
+		"created_at":                       ActionIgnore, // Never changes, but is implicit and not helpful in a diff.
+		"updated_at":                       ActionIgnore, // Changes, but is implicit and not helpful in a diff.
+		"organization_id":                  ActionIgnore, /// Never changes.
+		"deleted":                          ActionIgnore, // Changes, but is implicit when a delete event is fired.
+		"name":                             ActionTrack,
+		"display_name":                     ActionTrack,
+		"provisioner":                      ActionTrack,
+		"active_version_id":                ActionTrack,
+		"description":                      ActionTrack,
+		"icon":                             ActionTrack,
+		"default_ttl":                      ActionTrack,
+		"min_autostart_interval":           ActionTrack,
+		"created_by":                       ActionTrack,
+		"is_private":                       ActionTrack,
+		"group_acl":                        ActionTrack,
+		"user_acl":                         ActionTrack,
+		"allow_user_cancel_workspace_jobs": ActionTrack,
 	},
 	&database.TemplateVersion{}: {
 		"id":              ActionTrack,
@@ -104,14 +109,6 @@ var AuditableResources = auditMap(map[any]map[string]Action{
 		"ttl":                ActionTrack,
 		"last_used_at":       ActionIgnore,
 	},
-	&database.Group{}: {
-		"id":              ActionTrack,
-		"name":            ActionTrack,
-		"organization_id": ActionIgnore, // Never changes.
-		"avatar_url":      ActionTrack,
-	},
-	// We don't show any diff for the WorkspaceBuild resource,
-	// save for the template_version_id
 	&database.WorkspaceBuild{}: {
 		"id":                  ActionIgnore,
 		"created_at":          ActionIgnore,
@@ -125,6 +122,38 @@ var AuditableResources = auditMap(map[any]map[string]Action{
 		"job_id":              ActionIgnore,
 		"deadline":            ActionIgnore,
 		"reason":              ActionIgnore,
+		"daily_cost":          ActionIgnore,
+	},
+	&database.AuditableGroup{}: {
+		"id":              ActionTrack,
+		"name":            ActionTrack,
+		"organization_id": ActionIgnore, // Never changes.
+		"avatar_url":      ActionTrack,
+		"quota_allowance": ActionTrack,
+		"members":         ActionTrack,
+	},
+	// We don't show any diff for the APIKey resource
+	&database.APIKey{}: {
+		"id":               ActionIgnore,
+		"hashed_secret":    ActionIgnore,
+		"user_id":          ActionIgnore,
+		"last_used":        ActionIgnore,
+		"expires_at":       ActionIgnore,
+		"created_at":       ActionIgnore,
+		"updated_at":       ActionIgnore,
+		"login_type":       ActionIgnore,
+		"lifetime_seconds": ActionIgnore,
+		"ip_address":       ActionIgnore,
+		"scope":            ActionIgnore,
+	},
+	// TODO: track an ID here when the below ticket is completed:
+	// https://github.com/coder/coder/pull/6012
+	&database.License{}: {
+		"id":          ActionIgnore,
+		"uploaded_at": ActionTrack,
+		"jwt":         ActionIgnore,
+		"exp":         ActionTrack,
+		"uuid":        ActionTrack,
 	},
 })
 

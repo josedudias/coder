@@ -1,4 +1,4 @@
-import { makeStyles } from "@material-ui/core/styles"
+import { makeStyles, Theme } from "@material-ui/core/styles"
 import dayjs from "dayjs"
 import { FC, Fragment } from "react"
 import { ProvisionerJobLog } from "../../api/typesGenerated"
@@ -39,12 +39,21 @@ const getStageDurationInSeconds = (logs: ProvisionerJobLog[]) => {
 
 export interface WorkspaceBuildLogsProps {
   logs: ProvisionerJobLog[]
+  hideTimestamps?: boolean
+
+  // If true, render different styles that fit the template editor pane
+  // a bit better.
+  templateEditorPane?: boolean
 }
 
-export const WorkspaceBuildLogs: FC<WorkspaceBuildLogsProps> = ({ logs }) => {
+export const WorkspaceBuildLogs: FC<WorkspaceBuildLogsProps> = ({
+  hideTimestamps,
+  logs,
+  templateEditorPane,
+}) => {
   const groupedLogsByStage = groupLogsByStage(logs)
   const stages = Object.keys(groupedLogsByStage)
-  const styles = useStyles()
+  const styles = useStyles({ templateEditorPane: Boolean(templateEditorPane) })
 
   return (
     <div className={styles.logs}>
@@ -54,6 +63,7 @@ export const WorkspaceBuildLogs: FC<WorkspaceBuildLogsProps> = ({ logs }) => {
         const lines = logs.map((log) => ({
           time: log.created_at,
           output: log.output,
+          level: log.log_level,
         }))
         const duration = getStageDurationInSeconds(logs)
         const shouldDisplayDuration = duration !== undefined
@@ -68,7 +78,7 @@ export const WorkspaceBuildLogs: FC<WorkspaceBuildLogsProps> = ({ logs }) => {
                 </div>
               )}
             </div>
-            {!isEmpty && <Logs lines={lines} className={styles.codeBlock} />}
+            {!isEmpty && <Logs hideTimestamps={hideTimestamps} lines={lines} />}
           </Fragment>
         )
       })}
@@ -76,18 +86,24 @@ export const WorkspaceBuildLogs: FC<WorkspaceBuildLogsProps> = ({ logs }) => {
   )
 }
 
-const useStyles = makeStyles((theme) => ({
+const useStyles = makeStyles<
+  Theme,
+  {
+    templateEditorPane: boolean
+  }
+>((theme) => ({
   logs: {
     border: `1px solid ${theme.palette.divider}`,
-    borderRadius: theme.shape.borderRadius,
+    borderRadius: (props) =>
+      props.templateEditorPane ? "0px" : theme.shape.borderRadius,
     fontFamily: MONOSPACE_FONT_FAMILY,
   },
 
   header: {
     fontSize: 14,
     padding: theme.spacing(2),
-    paddingLeft: theme.spacing(4),
-    paddingRight: theme.spacing(4),
+    paddingLeft: theme.spacing(3),
+    paddingRight: theme.spacing(3),
     borderBottom: `1px solid ${theme.palette.divider}`,
     backgroundColor: theme.palette.background.paper,
     display: "flex",
@@ -111,10 +127,5 @@ const useStyles = makeStyles((theme) => ({
     marginLeft: "auto",
     color: theme.palette.text.secondary,
     fontSize: theme.typography.body2.fontSize,
-  },
-
-  codeBlock: {
-    padding: theme.spacing(2),
-    paddingLeft: theme.spacing(4),
   },
 }))

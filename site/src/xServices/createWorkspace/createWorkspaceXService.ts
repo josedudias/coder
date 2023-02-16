@@ -2,16 +2,16 @@ import {
   checkAuthorization,
   createWorkspace,
   getTemplates,
+  getTemplateVersionRichParameters,
   getTemplateVersionSchema,
-  getWorkspaceQuota,
 } from "api/api"
 import {
   CreateWorkspaceRequest,
   ParameterSchema,
   Template,
+  TemplateVersionParameter,
   User,
   Workspace,
-  WorkspaceQuota,
 } from "api/typesGenerated"
 import { assign, createMachine } from "xstate"
 
@@ -19,19 +19,18 @@ type CreateWorkspaceContext = {
   organizationId: string
   owner: User | null
   templateName: string
-  workspaceQuotaEnabled: boolean
   templates?: Template[]
   selectedTemplate?: Template
+  templateParameters?: TemplateVersionParameter[]
   templateSchema?: ParameterSchema[]
   createWorkspaceRequest?: CreateWorkspaceRequest
   createdWorkspace?: Workspace
   createWorkspaceError?: Error | unknown
   getTemplatesError?: Error | unknown
+  getTemplateParametersError?: Error | unknown
   getTemplateSchemaError?: Error | unknown
   permissions?: Record<string, boolean>
   checkPermissionsError?: Error | unknown
-  workspaceQuota?: WorkspaceQuota
-  getWorkspaceQuotaError?: Error | unknown
 }
 
 type CreateWorkspaceEvent = {
@@ -57,11 +56,11 @@ export const createWorkspaceMachine = createMachine(
         getTemplates: {
           data: Template[]
         }
+        getTemplateParameters: {
+          data: TemplateVersionParameter[]
+        }
         getTemplateSchema: {
           data: ParameterSchema[]
-        }
-        getWorkspaceQuota: {
-          data: WorkspaceQuota
         }
         createWorkspace: {
           data: Workspace
@@ -96,10 +95,24 @@ export const createWorkspaceMachine = createMachine(
           src: "getTemplateSchema",
           onDone: {
             actions: ["assignTemplateSchema"],
-            target: "checkingPermissions",
+            target: "gettingTemplateParameters",
           },
           onError: {
             actions: ["assignGetTemplateSchemaError"],
+            target: "error",
+          },
+        },
+      },
+      gettingTemplateParameters: {
+        entry: "clearGetTemplateParametersError",
+        invoke: {
+          src: "getTemplateParameters",
+          onDone: {
+            actions: ["assignTemplateParameters"],
+            target: "checkingPermissions",
+          },
+          onError: {
+            actions: ["assignGetTemplateParametersError"],
             target: "error",
           },
         },
@@ -110,25 +123,11 @@ export const createWorkspaceMachine = createMachine(
           src: "checkPermissions",
           id: "checkPermissions",
           onDone: {
-            actions: ["assignPermissions"],
-            target: "gettingWorkspaceQuota",
-          },
-          onError: {
-            actions: ["assignCheckPermissionsError"],
-          },
-        },
-      },
-      gettingWorkspaceQuota: {
-        entry: "clearGetWorkspaceQuotaError",
-        invoke: {
-          src: "getWorkspaceQuota",
-          onDone: {
-            actions: ["assignWorkspaceQuota"],
+            actions: "assignPermissions",
             target: "fillingParams",
           },
           onError: {
-            actions: ["assignGetWorkspaceQuotaError"],
-            target: "error",
+            actions: ["assignCheckPermissionsError"],
           },
         },
       },
@@ -140,7 +139,7 @@ export const createWorkspaceMachine = createMachine(
           },
           SELECT_OWNER: {
             actions: ["assignOwner"],
-            target: "gettingWorkspaceQuota",
+            target: ["fillingParams"],
           },
         },
       },
@@ -167,6 +166,17 @@ export const createWorkspaceMachine = createMachine(
   {
     services: {
       getTemplates: (context) => getTemplates(context.organizationId),
+      getTemplateParameters: (context) => {
+        const { selectedTemplate } = context
+
+        if (!selectedTemplate) {
+          throw new Error("No selected template")
+        }
+
+        return getTemplateVersionRichParameters(
+          selectedTemplate.active_version_id,
+        )
+      },
       getTemplateSchema: (context) => {
         const { selectedTemplate } = context
 
@@ -212,17 +222,6 @@ export const createWorkspaceMachine = createMachine(
           createWorkspaceRequest,
         )
       },
-      getWorkspaceQuota: (context) => {
-        if (!context.workspaceQuotaEnabled) {
-          // resolving with a limit of 0 will disable the component
-          return Promise.resolve({
-            user_workspace_count: 0,
-            user_workspace_limit: 0,
-          })
-        }
-
-        return getWorkspaceQuota(context.owner?.id ?? "me")
-      },
     },
     guards: {
       areTemplatesEmpty: (_, event) => event.data.length === 0,
@@ -239,11 +238,13 @@ export const createWorkspaceMachine = createMachine(
           return templates.length > 0 ? templates[0] : undefined
         },
       }),
+      assignTemplateParameters: assign({
+        templateParameters: (_, event) => event.data,
+      }),
       assignTemplateSchema: assign({
         // Only show parameters that are allowed to be overridden.
         // CLI code: https://github.com/coder/coder/blob/main/cli/create.go#L152-L155
-        templateSchema: (_, event) =>
-          event.data.filter((param) => param.allow_override_source),
+        templateSchema: (_, event) => event.data,
       }),
       assignPermissions: assign({
         permissions: (_, event) => event.data as Record<string, boolean>,
@@ -272,20 +273,17 @@ export const createWorkspaceMachine = createMachine(
       clearGetTemplatesError: assign({
         getTemplatesError: (_) => undefined,
       }),
+      assignGetTemplateParametersError: assign({
+        getTemplateParametersError: (_, event) => event.data,
+      }),
+      clearGetTemplateParametersError: assign({
+        getTemplateParametersError: (_) => undefined,
+      }),
       assignGetTemplateSchemaError: assign({
         getTemplateSchemaError: (_, event) => event.data,
       }),
       clearGetTemplateSchemaError: assign({
         getTemplateSchemaError: (_) => undefined,
-      }),
-      assignWorkspaceQuota: assign({
-        workspaceQuota: (_, event) => event.data,
-      }),
-      assignGetWorkspaceQuotaError: assign({
-        getWorkspaceQuotaError: (_, event) => event.data,
-      }),
-      clearGetWorkspaceQuotaError: assign({
-        getWorkspaceQuotaError: (_) => undefined,
       }),
     },
   },

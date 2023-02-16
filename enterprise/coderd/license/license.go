@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v4"
@@ -24,12 +23,12 @@ func Entitlements(
 	replicaCount int,
 	gitAuthCount int,
 	keys map[string]ed25519.PublicKey,
-	enablements map[string]bool,
+	enablements map[codersdk.FeatureName]bool,
 ) (codersdk.Entitlements, error) {
 	now := time.Now()
 	// Default all entitlements to be disabled.
 	entitlements := codersdk.Entitlements{
-		Features: map[string]codersdk.Feature{},
+		Features: map[codersdk.FeatureName]codersdk.Feature{},
 		Warnings: []string{},
 		Errors:   []string{},
 	}
@@ -54,7 +53,7 @@ func Entitlements(
 
 	// Here we loop through licenses to detect enabled features.
 	for _, l := range licenses {
-		claims, err := validateDBLicense(l, keys)
+		claims, err := ParseClaims(l.JWT, keys)
 		if err != nil {
 			logger.Debug(ctx, "skipping invalid license",
 				slog.F("id", l.ID), slog.Error(err))
@@ -68,64 +67,38 @@ func Entitlements(
 			// LicenseExpires we must be in grace period.
 			entitlement = codersdk.EntitlementGracePeriod
 		}
-		if claims.Features.UserLimit > 0 {
-			limit := claims.Features.UserLimit
-			priorLimit := entitlements.Features[codersdk.FeatureUserLimit]
-			if priorLimit.Limit != nil && *priorLimit.Limit > limit {
-				limit = *priorLimit.Limit
+		for featureName, featureValue := range claims.Features {
+			// Can this be negative?
+			if featureValue <= 0 {
+				continue
 			}
-			entitlements.Features[codersdk.FeatureUserLimit] = codersdk.Feature{
-				Enabled:     true,
-				Entitlement: entitlement,
-				Limit:       &limit,
-				Actual:      &activeUserCount,
-			}
-		}
-		if claims.Features.AuditLog > 0 {
-			entitlements.Features[codersdk.FeatureAuditLog] = codersdk.Feature{
-				Entitlement: entitlement,
-				Enabled:     enablements[codersdk.FeatureAuditLog],
-			}
-		}
-		if claims.Features.BrowserOnly > 0 {
-			entitlements.Features[codersdk.FeatureBrowserOnly] = codersdk.Feature{
-				Entitlement: entitlement,
-				Enabled:     enablements[codersdk.FeatureBrowserOnly],
-			}
-		}
-		if claims.Features.SCIM > 0 {
-			entitlements.Features[codersdk.FeatureSCIM] = codersdk.Feature{
-				Entitlement: entitlement,
-				Enabled:     enablements[codersdk.FeatureSCIM],
+
+			switch featureName {
+			// User limit has special treatment as our only non-boolean feature.
+			case codersdk.FeatureUserLimit:
+				limit := featureValue
+				priorLimit := entitlements.Features[codersdk.FeatureUserLimit]
+				if priorLimit.Limit != nil && *priorLimit.Limit > limit {
+					limit = *priorLimit.Limit
+				}
+				entitlements.Features[codersdk.FeatureUserLimit] = codersdk.Feature{
+					Enabled:     true,
+					Entitlement: entitlement,
+					Limit:       &limit,
+					Actual:      &activeUserCount,
+				}
+			default:
+				entitlements.Features[featureName] = codersdk.Feature{
+					Entitlement: entitlement,
+					Enabled:     enablements[featureName] || featureName.AlwaysEnable(),
+				}
 			}
 		}
-		if claims.Features.WorkspaceQuota > 0 {
-			entitlements.Features[codersdk.FeatureWorkspaceQuota] = codersdk.Feature{
-				Entitlement: entitlement,
-				Enabled:     enablements[codersdk.FeatureWorkspaceQuota],
-			}
-		}
-		if claims.Features.HighAvailability > 0 {
-			entitlements.Features[codersdk.FeatureHighAvailability] = codersdk.Feature{
-				Entitlement: entitlement,
-				Enabled:     enablements[codersdk.FeatureHighAvailability],
-			}
-		}
-		if claims.Features.TemplateRBAC > 0 {
-			entitlements.Features[codersdk.FeatureTemplateRBAC] = codersdk.Feature{
-				Entitlement: entitlement,
-				Enabled:     enablements[codersdk.FeatureTemplateRBAC],
-			}
-		}
-		if claims.Features.MultipleGitAuth > 0 {
-			entitlements.Features[codersdk.FeatureMultipleGitAuth] = codersdk.Feature{
-				Entitlement: entitlement,
-				Enabled:     true,
-			}
-		}
+
 		if claims.AllFeatures {
 			allFeatures = true
 		}
+		entitlements.RequireTelemetry = entitlements.RequireTelemetry || claims.RequireTelemetry
 	}
 
 	if allFeatures {
@@ -165,7 +138,7 @@ func Entitlements(
 			if !feature.Enabled {
 				continue
 			}
-			niceName := strings.Title(strings.ReplaceAll(featureName, "_", " "))
+			niceName := featureName.Humanize()
 			switch feature.Entitlement {
 			case codersdk.EntitlementNotEntitled:
 				entitlements.Warnings = append(entitlements.Warnings,
@@ -243,16 +216,7 @@ var (
 	ErrMissingLicenseExpires = xerrors.New("license missing license_expires")
 )
 
-type Features struct {
-	UserLimit        int64 `json:"user_limit"`
-	AuditLog         int64 `json:"audit_log"`
-	BrowserOnly      int64 `json:"browser_only"`
-	SCIM             int64 `json:"scim"`
-	WorkspaceQuota   int64 `json:"workspace_quota"`
-	TemplateRBAC     int64 `json:"template_rbac"`
-	HighAvailability int64 `json:"high_availability"`
-	MultipleGitAuth  int64 `json:"multiple_git_auth"`
-}
+type Features map[codersdk.FeatureName]int64
 
 type Claims struct {
 	jwt.RegisteredClaims
@@ -261,17 +225,18 @@ type Claims struct {
 	// the end of the grace period (identical to LicenseExpires if there is no grace period).
 	// The reason we use the standard claim for the end of the grace period is that we want JWT
 	// processing libraries to consider the token "valid" until then.
-	LicenseExpires *jwt.NumericDate `json:"license_expires,omitempty"`
-	AccountType    string           `json:"account_type,omitempty"`
-	AccountID      string           `json:"account_id,omitempty"`
-	Trial          bool             `json:"trial"`
-	AllFeatures    bool             `json:"all_features"`
-	Version        uint64           `json:"version"`
-	Features       Features         `json:"features"`
+	LicenseExpires   *jwt.NumericDate `json:"license_expires,omitempty"`
+	AccountType      string           `json:"account_type,omitempty"`
+	AccountID        string           `json:"account_id,omitempty"`
+	Trial            bool             `json:"trial"`
+	AllFeatures      bool             `json:"all_features"`
+	Version          uint64           `json:"version"`
+	Features         Features         `json:"features"`
+	RequireTelemetry bool             `json:"require_telemetry,omitempty"`
 }
 
-// Parse consumes a license and returns the claims.
-func Parse(l string, keys map[string]ed25519.PublicKey) (jwt.MapClaims, error) {
+// ParseRaw consumes a license and returns the claims.
+func ParseRaw(l string, keys map[string]ed25519.PublicKey) (jwt.MapClaims, error) {
 	tok, err := jwt.Parse(
 		l,
 		keyFunc(keys),
@@ -293,11 +258,11 @@ func Parse(l string, keys map[string]ed25519.PublicKey) (jwt.MapClaims, error) {
 	return nil, xerrors.New("unable to parse Claims")
 }
 
-// validateDBLicense validates a database.License record, and if valid, returns the claims.  If
+// ParseClaims validates a database.License record, and if valid, returns the claims.  If
 // unparsable or invalid, it returns an error
-func validateDBLicense(l database.License, keys map[string]ed25519.PublicKey) (*Claims, error) {
+func ParseClaims(rawJWT string, keys map[string]ed25519.PublicKey) (*Claims, error) {
 	tok, err := jwt.ParseWithClaims(
-		l.JWT,
+		rawJWT,
 		&Claims{},
 		keyFunc(keys),
 		jwt.WithValidMethods(ValidMethods),

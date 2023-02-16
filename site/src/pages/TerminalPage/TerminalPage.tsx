@@ -1,13 +1,10 @@
 import { makeStyles } from "@material-ui/core/styles"
 import { useMachine } from "@xstate/react"
-import { FC, useEffect, useRef, useState } from "react"
+import { portForwardURL } from "components/PortForwardButton/PortForwardButton"
+import { Stack } from "components/Stack/Stack"
+import { FC, useCallback, useEffect, useRef, useState } from "react"
 import { Helmet } from "react-helmet-async"
-import {
-  useLocation,
-  useNavigate,
-  useParams,
-  useSearchParams,
-} from "react-router-dom"
+import { useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { colors } from "theme/colors"
 import { v4 as uuidv4 } from "uuid"
 import * as XTerm from "xterm"
@@ -24,15 +21,42 @@ export const Language = {
   websocketErrorMessagePrefix: "WebSocket failed: ",
 }
 
+const useReloading = (isDisconnected: boolean) => {
+  const [status, setStatus] = useState<"reloading" | "notReloading">(
+    "notReloading",
+  )
+
+  // Retry connection on key press when it is disconnected
+  useEffect(() => {
+    if (!isDisconnected) {
+      return
+    }
+
+    const keyDownHandler = () => {
+      setStatus("reloading")
+      window.location.reload()
+    }
+
+    document.addEventListener("keydown", keyDownHandler)
+
+    return () => {
+      document.removeEventListener("keydown", keyDownHandler)
+    }
+  }, [isDisconnected])
+
+  return {
+    status,
+  }
+}
+
 const TerminalPage: FC<
   React.PropsWithChildren<{
     readonly renderer?: XTerm.RendererType
   }>
 > = ({ renderer }) => {
-  const location = useLocation()
   const navigate = useNavigate()
   const styles = useStyles()
-  const { username, workspace } = useParams()
+  const { username, workspace: workspaceName } = useParams()
   const xtermRef = useRef<HTMLDivElement>(null)
   const [terminal, setTerminal] = useState<XTerm.Terminal | null>(null)
   const [fitAddon, setFitAddon] = useState<FitAddon | null>(null)
@@ -44,7 +68,7 @@ const TerminalPage: FC<
   const command = searchParams.get("command") || undefined
   // The workspace name is in the format:
   // <workspace name>[.<agent name>]
-  const workspaceNameParts = workspace?.split(".")
+  const workspaceNameParts = workspaceName?.split(".")
   const [terminalState, sendEvent] = useMachine(terminalMachine, {
     context: {
       agentName: workspaceNameParts?.[1],
@@ -69,10 +93,58 @@ const TerminalPage: FC<
   const isDisconnected = terminalState.matches("disconnected")
   const {
     workspaceError,
+    workspace,
     workspaceAgentError,
     workspaceAgent,
     websocketError,
+    applicationsHost,
   } = terminalState.context
+  const reloading = useReloading(isDisconnected)
+
+  // handleWebLink handles opening of URLs in the terminal!
+  const handleWebLink = useCallback(
+    (uri: string) => {
+      if (!workspaceAgent || !workspace || !username || !applicationsHost) {
+        return
+      }
+
+      const open = (uri: string) => {
+        // Copied from: https://github.com/xtermjs/xterm.js/blob/master/addons/xterm-addon-web-links/src/WebLinksAddon.ts#L23
+        const newWindow = window.open()
+        if (newWindow) {
+          try {
+            newWindow.opener = null
+          } catch {
+            // no-op, Electron can throw
+          }
+          newWindow.location.href = uri
+        } else {
+          console.warn("Opening link blocked as opener could not be cleared")
+        }
+      }
+
+      try {
+        const url = new URL(uri)
+        const localHosts = ["0.0.0.0", "127.0.0.1", "localhost"]
+        if (!localHosts.includes(url.hostname)) {
+          open(uri)
+          return
+        }
+        open(
+          portForwardURL(
+            applicationsHost,
+            parseInt(url.port),
+            workspaceAgent.name,
+            workspace.name,
+            username,
+          ) + url.pathname,
+        )
+      } catch (ex) {
+        open(uri)
+      }
+    },
+    [workspaceAgent, workspace, username, applicationsHost],
+  )
 
   // Create the terminal!
   useEffect(() => {
@@ -92,7 +164,11 @@ const TerminalPage: FC<
     const fitAddon = new FitAddon()
     setFitAddon(fitAddon)
     terminal.loadAddon(fitAddon)
-    terminal.loadAddon(new WebLinksAddon())
+    terminal.loadAddon(
+      new WebLinksAddon((_, uri) => {
+        handleWebLink(uri)
+      }),
+    )
     terminal.onData((data) => {
       sendEvent({
         type: "WRITE",
@@ -121,23 +197,25 @@ const TerminalPage: FC<
       window.removeEventListener("resize", listener)
       terminal.dispose()
     }
-  }, [renderer, sendEvent, xtermRef])
+  }, [renderer, sendEvent, xtermRef, handleWebLink])
 
   // Triggers the initial terminal connection using
   // the reconnection token and workspace name found
   // from the router.
   useEffect(() => {
-    const search = new URLSearchParams(location.search)
-    search.set("reconnect", reconnectionToken)
+    if (searchParams.get("reconnect") === reconnectionToken) {
+      return
+    }
+    searchParams.set("reconnect", reconnectionToken)
     navigate(
       {
-        search: search.toString(),
+        search: searchParams.toString(),
       },
       {
         replace: true,
       },
     )
-  }, [location.search, navigate, reconnectionToken])
+  }, [searchParams, navigate, reconnectionToken])
 
   // Apply terminal options based on connection state.
   useEffect(() => {
@@ -220,7 +298,16 @@ const TerminalPage: FC<
       {/* This overlay makes it more obvious that the terminal is disconnected. */}
       {/* It's nice for situations where Coder restarts, and they are temporarily disconnected. */}
       <div className={`${styles.overlay} ${isDisconnected ? "" : "connected"}`}>
-        <span className={styles.overlayText}>Disconnected</span>
+        {reloading.status === "reloading" ? (
+          <span className={styles.overlayText}>Reloading...</span>
+        ) : (
+          <Stack spacing={0.5} alignItems="center">
+            <span className={styles.overlayText}>Disconnected</span>
+            <span className={styles.overlaySubtext}>
+              Press any key to retry
+            </span>
+          </Stack>
+        )}
       </div>
       <div className={styles.terminal} ref={xtermRef} data-testid="terminal" />
     </>
@@ -229,7 +316,7 @@ const TerminalPage: FC<
 
 export default TerminalPage
 
-const useStyles = makeStyles(() => ({
+const useStyles = makeStyles((theme) => ({
   overlay: {
     position: "absolute",
     pointerEvents: "none",
@@ -242,17 +329,20 @@ const useStyles = makeStyles(() => ({
     justifyContent: "center",
     display: "flex",
     color: "white",
-    fontFamily: MONOSPACE_FONT_FAMILY,
-    fontSize: 18,
+    fontSize: 16,
     backgroundColor: "rgba(0, 0, 0, 0.6)",
+    backdropFilter: "blur(4px)",
     "&.connected": {
       opacity: 0,
     },
   },
   overlayText: {
-    padding: 32,
-    fontSize: 24,
-    backgroundColor: "#000",
+    fontSize: 16,
+    fontWeight: 600,
+  },
+  overlaySubtext: {
+    fontSize: 14,
+    color: theme.palette.text.secondary,
   },
   terminal: {
     width: "100vw",

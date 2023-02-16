@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,20 +13,30 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"cdr.dev/slog/sloggers/slogtest"
+	"github.com/coder/coder/coderd/audit"
 	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/coderd/database/databasefake"
+	"github.com/coder/coder/coderd/database/dbfake"
+	"github.com/coder/coder/coderd/database/dbgen"
 	"github.com/coder/coder/coderd/provisionerdserver"
 	"github.com/coder/coder/coderd/telemetry"
 	"github.com/coder/coder/codersdk"
 	"github.com/coder/coder/provisionerd/proto"
 	sdkproto "github.com/coder/coder/provisionersdk/proto"
+	"github.com/coder/coder/testutil"
 )
+
+func mockAuditor() *atomic.Pointer[audit.Auditor] {
+	ptr := &atomic.Pointer[audit.Auditor]{}
+	mock := audit.Auditor(audit.NewMock())
+	ptr.Store(&mock)
+	return ptr
+}
 
 func TestAcquireJob(t *testing.T) {
 	t.Parallel()
 	t.Run("Debounce", func(t *testing.T) {
 		t.Parallel()
-		db := databasefake.New()
+		db := dbfake.New()
 		pubsub := database.NewPubsubInMemory()
 		srv := &provisionerdserver.Server{
 			ID:                 uuid.New(),
@@ -36,14 +47,17 @@ func TestAcquireJob(t *testing.T) {
 			Pubsub:             pubsub,
 			Telemetry:          telemetry.NewNoop(),
 			AcquireJobDebounce: time.Hour,
+			Auditor:            mockAuditor(),
 		}
 		job, err := srv.AcquireJob(context.Background(), nil)
 		require.NoError(t, err)
 		require.Equal(t, &proto.AcquiredJob{}, job)
 		_, err = srv.Database.InsertProvisionerJob(context.Background(), database.InsertProvisionerJobParams{
-			ID:          uuid.New(),
-			InitiatorID: uuid.New(),
-			Provisioner: database.ProvisionerTypeEcho,
+			ID:            uuid.New(),
+			InitiatorID:   uuid.New(),
+			Provisioner:   database.ProvisionerTypeEcho,
+			StorageMethod: database.ProvisionerStorageMethodFile,
+			Type:          database.ProvisionerJobTypeTemplateVersionDryRun,
 		})
 		require.NoError(t, err)
 		job, err = srv.AcquireJob(context.Background(), nil)
@@ -52,18 +66,20 @@ func TestAcquireJob(t *testing.T) {
 	})
 	t.Run("NoJobs", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
+		srv := setup(t, false)
 		job, err := srv.AcquireJob(context.Background(), nil)
 		require.NoError(t, err)
 		require.Equal(t, &proto.AcquiredJob{}, job)
 	})
 	t.Run("InitiatorNotFound", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
+		srv := setup(t, false)
 		_, err := srv.Database.InsertProvisionerJob(context.Background(), database.InsertProvisionerJobParams{
-			ID:          uuid.New(),
-			InitiatorID: uuid.New(),
-			Provisioner: database.ProvisionerTypeEcho,
+			ID:            uuid.New(),
+			InitiatorID:   uuid.New(),
+			Provisioner:   database.ProvisionerTypeEcho,
+			StorageMethod: database.ProvisionerStorageMethodFile,
+			Type:          database.ProvisionerJobTypeTemplateVersionDryRun,
 		})
 		require.NoError(t, err)
 		_, err = srv.AcquireJob(context.Background(), nil)
@@ -71,69 +87,76 @@ func TestAcquireJob(t *testing.T) {
 	})
 	t.Run("WorkspaceBuildJob", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
+		srv := setup(t, false)
 		ctx := context.Background()
-		user, err := srv.Database.InsertUser(context.Background(), database.InsertUserParams{
-			ID:       uuid.New(),
-			Username: "testing",
+
+		user := dbgen.User(t, srv.Database, database.User{})
+		template := dbgen.Template(t, srv.Database, database.Template{
+			Name:        "template",
+			Provisioner: database.ProvisionerTypeEcho,
 		})
-		require.NoError(t, err)
-		template, err := srv.Database.InsertTemplate(ctx, database.InsertTemplateParams{
-			ID:   uuid.New(),
-			Name: "template",
-		})
-		require.NoError(t, err)
-		version, err := srv.Database.InsertTemplateVersion(ctx, database.InsertTemplateVersionParams{
-			ID: uuid.New(),
+		file := dbgen.File(t, srv.Database, database.File{CreatedBy: user.ID})
+		versionFile := dbgen.File(t, srv.Database, database.File{CreatedBy: user.ID})
+		version := dbgen.TemplateVersion(t, srv.Database, database.TemplateVersion{
 			TemplateID: uuid.NullUUID{
 				UUID:  template.ID,
 				Valid: true,
 			},
 			JobID: uuid.New(),
 		})
-		require.NoError(t, err)
-		workspace, err := srv.Database.InsertWorkspace(ctx, database.InsertWorkspaceParams{
-			ID:         uuid.New(),
-			OwnerID:    user.ID,
-			TemplateID: template.ID,
-			Name:       "workspace",
+		// Import version job
+		_ = dbgen.ProvisionerJob(t, srv.Database, database.ProvisionerJob{
+			ID:            version.JobID,
+			InitiatorID:   user.ID,
+			FileID:        versionFile.ID,
+			Provisioner:   database.ProvisionerTypeEcho,
+			StorageMethod: database.ProvisionerStorageMethodFile,
+			Type:          database.ProvisionerJobTypeTemplateVersionImport,
+			Input: must(json.Marshal(provisionerdserver.TemplateVersionImportJob{
+				TemplateVersionID: version.ID,
+				UserVariableValues: []codersdk.VariableValue{
+					{Name: "second", Value: "bah"},
+				},
+			})),
 		})
-		require.NoError(t, err)
-		build, err := srv.Database.InsertWorkspaceBuild(ctx, database.InsertWorkspaceBuildParams{
-			ID:                uuid.New(),
+		_ = dbgen.TemplateVersionVariable(t, srv.Database, database.TemplateVersionVariable{
+			TemplateVersionID: version.ID,
+			Name:              "first",
+			Value:             "first_value",
+			DefaultValue:      "default_value",
+			Sensitive:         true,
+		})
+		_ = dbgen.TemplateVersionVariable(t, srv.Database, database.TemplateVersionVariable{
+			TemplateVersionID: version.ID,
+			Name:              "second",
+			Value:             "second_value",
+			DefaultValue:      "default_value",
+			Required:          true,
+			Sensitive:         false,
+		})
+		workspace := dbgen.Workspace(t, srv.Database, database.Workspace{
+			TemplateID: template.ID,
+			OwnerID:    user.ID,
+		})
+		build := dbgen.WorkspaceBuild(t, srv.Database, database.WorkspaceBuild{
 			WorkspaceID:       workspace.ID,
 			BuildNumber:       1,
 			JobID:             uuid.New(),
 			TemplateVersionID: version.ID,
 			Transition:        database.WorkspaceTransitionStart,
+			Reason:            database.BuildReasonInitiator,
 		})
-		require.NoError(t, err)
-
-		data, err := json.Marshal(provisionerdserver.WorkspaceProvisionJob{
-			WorkspaceBuildID: build.ID,
+		_ = dbgen.ProvisionerJob(t, srv.Database, database.ProvisionerJob{
+			ID:            build.ID,
+			InitiatorID:   user.ID,
+			Provisioner:   database.ProvisionerTypeEcho,
+			StorageMethod: database.ProvisionerStorageMethodFile,
+			FileID:        file.ID,
+			Type:          database.ProvisionerJobTypeWorkspaceBuild,
+			Input: must(json.Marshal(provisionerdserver.WorkspaceProvisionJob{
+				WorkspaceBuildID: build.ID,
+			})),
 		})
-		require.NoError(t, err)
-
-		file, err := srv.Database.InsertFile(ctx, database.InsertFileParams{
-			ID:   uuid.New(),
-			Hash: "something",
-			Data: []byte{},
-		})
-		require.NoError(t, err)
-
-		_, err = srv.Database.InsertProvisionerJob(context.Background(), database.InsertProvisionerJobParams{
-			ID:             build.JobID,
-			CreatedAt:      database.Now(),
-			UpdatedAt:      database.Now(),
-			OrganizationID: uuid.New(),
-			InitiatorID:    user.ID,
-			Provisioner:    database.ProvisionerTypeEcho,
-			StorageMethod:  database.ProvisionerStorageMethodFile,
-			FileID:         file.ID,
-			Type:           database.ProvisionerJobTypeWorkspaceBuild,
-			Input:          data,
-		})
-		require.NoError(t, err)
 
 		published := make(chan struct{})
 		closeSubscribe, err := srv.Pubsub.Subscribe(codersdk.WorkspaceNotifyChannel(workspace.ID), func(_ context.Context, _ []byte) {
@@ -142,8 +165,17 @@ func TestAcquireJob(t *testing.T) {
 		require.NoError(t, err)
 		defer closeSubscribe()
 
-		job, err := srv.AcquireJob(ctx, nil)
-		require.NoError(t, err)
+		var job *proto.AcquiredJob
+
+		for {
+			// Grab jobs until we find the workspace build job. There is also
+			// an import version job that we need to ignore.
+			job, err = srv.AcquireJob(ctx, nil)
+			require.NoError(t, err)
+			if _, ok := job.Type.(*proto.AcquiredJob_WorkspaceBuild_); ok {
+				break
+			}
+		}
 
 		<-published
 
@@ -155,6 +187,17 @@ func TestAcquireJob(t *testing.T) {
 				WorkspaceBuildId: build.ID.String(),
 				WorkspaceName:    workspace.Name,
 				ParameterValues:  []*sdkproto.ParameterValue{},
+				VariableValues: []*sdkproto.VariableValue{
+					{
+						Name:      "first",
+						Value:     "first_value",
+						Sensitive: true,
+					},
+					{
+						Name:  "second",
+						Value: "second_value",
+					},
+				},
 				Metadata: &sdkproto.Provision_Metadata{
 					CoderUrl:            srv.AccessURL.String(),
 					WorkspaceTransition: sdkproto.WorkspaceTransition_START,
@@ -172,45 +215,24 @@ func TestAcquireJob(t *testing.T) {
 	})
 	t.Run("TemplateVersionDryRun", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
+		srv := setup(t, false)
 		ctx := context.Background()
-		user, err := srv.Database.InsertUser(ctx, database.InsertUserParams{
-			ID:       uuid.New(),
-			Username: "testing",
-		})
-		require.NoError(t, err)
-		version, err := srv.Database.InsertTemplateVersion(ctx, database.InsertTemplateVersionParams{
-			ID: uuid.New(),
-		})
-		require.NoError(t, err)
 
-		data, err := json.Marshal(provisionerdserver.TemplateVersionDryRunJob{
-			TemplateVersionID: version.ID,
-			WorkspaceName:     "testing",
-			ParameterValues:   []database.ParameterValue{},
+		user := dbgen.User(t, srv.Database, database.User{})
+		version := dbgen.TemplateVersion(t, srv.Database, database.TemplateVersion{})
+		file := dbgen.File(t, srv.Database, database.File{CreatedBy: user.ID})
+		_ = dbgen.ProvisionerJob(t, srv.Database, database.ProvisionerJob{
+			InitiatorID:   user.ID,
+			Provisioner:   database.ProvisionerTypeEcho,
+			StorageMethod: database.ProvisionerStorageMethodFile,
+			FileID:        file.ID,
+			Type:          database.ProvisionerJobTypeTemplateVersionDryRun,
+			Input: must(json.Marshal(provisionerdserver.TemplateVersionDryRunJob{
+				TemplateVersionID: version.ID,
+				WorkspaceName:     "testing",
+				ParameterValues:   []database.ParameterValue{},
+			})),
 		})
-		require.NoError(t, err)
-
-		file, err := srv.Database.InsertFile(ctx, database.InsertFileParams{
-			ID:   uuid.New(),
-			Hash: "something",
-			Data: []byte{},
-		})
-		require.NoError(t, err)
-
-		_, err = srv.Database.InsertProvisionerJob(context.Background(), database.InsertProvisionerJobParams{
-			ID:             uuid.New(),
-			CreatedAt:      database.Now(),
-			UpdatedAt:      database.Now(),
-			OrganizationID: uuid.New(),
-			InitiatorID:    user.ID,
-			Provisioner:    database.ProvisionerTypeEcho,
-			StorageMethod:  database.ProvisionerStorageMethodFile,
-			FileID:         file.ID,
-			Type:           database.ProvisionerJobTypeTemplateVersionDryRun,
-			Input:          data,
-		})
-		require.NoError(t, err)
 
 		job, err := srv.AcquireJob(ctx, nil)
 		require.NoError(t, err)
@@ -232,34 +254,18 @@ func TestAcquireJob(t *testing.T) {
 	})
 	t.Run("TemplateVersionImport", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
+		srv := setup(t, false)
 		ctx := context.Background()
-		user, err := srv.Database.InsertUser(ctx, database.InsertUserParams{
-			ID:       uuid.New(),
-			Username: "testing",
-		})
-		require.NoError(t, err)
 
-		file, err := srv.Database.InsertFile(ctx, database.InsertFileParams{
-			ID:   uuid.New(),
-			Hash: "something",
-			Data: []byte{},
+		user := dbgen.User(t, srv.Database, database.User{})
+		file := dbgen.File(t, srv.Database, database.File{CreatedBy: user.ID})
+		_ = dbgen.ProvisionerJob(t, srv.Database, database.ProvisionerJob{
+			FileID:        file.ID,
+			InitiatorID:   user.ID,
+			Provisioner:   database.ProvisionerTypeEcho,
+			StorageMethod: database.ProvisionerStorageMethodFile,
+			Type:          database.ProvisionerJobTypeTemplateVersionImport,
 		})
-		require.NoError(t, err)
-
-		_, err = srv.Database.InsertProvisionerJob(context.Background(), database.InsertProvisionerJobParams{
-			ID:             uuid.New(),
-			CreatedAt:      database.Now(),
-			UpdatedAt:      database.Now(),
-			OrganizationID: uuid.New(),
-			InitiatorID:    user.ID,
-			Provisioner:    database.ProvisionerTypeEcho,
-			StorageMethod:  database.ProvisionerStorageMethodFile,
-			FileID:         file.ID,
-			Type:           database.ProvisionerJobTypeTemplateVersionImport,
-			Input:          json.RawMessage{},
-		})
-		require.NoError(t, err)
 
 		job, err := srv.AcquireJob(ctx, nil)
 		require.NoError(t, err)
@@ -277,6 +283,49 @@ func TestAcquireJob(t *testing.T) {
 		require.NoError(t, err)
 		require.JSONEq(t, string(want), string(got))
 	})
+	t.Run("TemplateVersionImportWithUserVariable", func(t *testing.T) {
+		t.Parallel()
+		srv := setup(t, false)
+
+		user := dbgen.User(t, srv.Database, database.User{})
+		version := dbgen.TemplateVersion(t, srv.Database, database.TemplateVersion{})
+		file := dbgen.File(t, srv.Database, database.File{CreatedBy: user.ID})
+		_ = dbgen.ProvisionerJob(t, srv.Database, database.ProvisionerJob{
+			FileID:        file.ID,
+			InitiatorID:   user.ID,
+			Provisioner:   database.ProvisionerTypeEcho,
+			StorageMethod: database.ProvisionerStorageMethodFile,
+			Type:          database.ProvisionerJobTypeTemplateVersionImport,
+			Input: must(json.Marshal(provisionerdserver.TemplateVersionImportJob{
+				TemplateVersionID: version.ID,
+				UserVariableValues: []codersdk.VariableValue{
+					{Name: "first", Value: "first_value"},
+				},
+			})),
+		})
+
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitShort)
+		defer cancel()
+
+		job, err := srv.AcquireJob(ctx, nil)
+		require.NoError(t, err)
+
+		got, err := json.Marshal(job.Type)
+		require.NoError(t, err)
+
+		want, err := json.Marshal(&proto.AcquiredJob_TemplateImport_{
+			TemplateImport: &proto.AcquiredJob_TemplateImport{
+				UserVariableValues: []*sdkproto.VariableValue{
+					{Name: "first", Value: "first_value"},
+				},
+				Metadata: &sdkproto.Provision_Metadata{
+					CoderUrl: srv.AccessURL.String(),
+				},
+			},
+		})
+		require.NoError(t, err)
+		require.JSONEq(t, string(want), string(got))
+	})
 }
 
 func TestUpdateJob(t *testing.T) {
@@ -284,7 +333,7 @@ func TestUpdateJob(t *testing.T) {
 	ctx := context.Background()
 	t.Run("NotFound", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
+		srv := setup(t, false)
 		_, err := srv.UpdateJob(ctx, &proto.UpdateJobRequest{
 			JobId: "hello",
 		})
@@ -297,9 +346,12 @@ func TestUpdateJob(t *testing.T) {
 	})
 	t.Run("NotRunning", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
+		srv := setup(t, false)
 		job, err := srv.Database.InsertProvisionerJob(ctx, database.InsertProvisionerJobParams{
-			ID: uuid.New(),
+			ID:            uuid.New(),
+			Provisioner:   database.ProvisionerTypeEcho,
+			StorageMethod: database.ProvisionerStorageMethodFile,
+			Type:          database.ProvisionerJobTypeTemplateVersionDryRun,
 		})
 		require.NoError(t, err)
 		_, err = srv.UpdateJob(ctx, &proto.UpdateJobRequest{
@@ -310,10 +362,12 @@ func TestUpdateJob(t *testing.T) {
 	// This test prevents runners from updating jobs they don't own!
 	t.Run("NotOwner", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
+		srv := setup(t, false)
 		job, err := srv.Database.InsertProvisionerJob(ctx, database.InsertProvisionerJobParams{
-			ID:          uuid.New(),
-			Provisioner: database.ProvisionerTypeEcho,
+			ID:            uuid.New(),
+			Provisioner:   database.ProvisionerTypeEcho,
+			StorageMethod: database.ProvisionerStorageMethodFile,
+			Type:          database.ProvisionerJobTypeTemplateVersionDryRun,
 		})
 		require.NoError(t, err)
 		_, err = srv.Database.AcquireProvisionerJob(ctx, database.AcquireProvisionerJobParams{
@@ -332,8 +386,10 @@ func TestUpdateJob(t *testing.T) {
 
 	setupJob := func(t *testing.T, srv *provisionerdserver.Server) uuid.UUID {
 		job, err := srv.Database.InsertProvisionerJob(ctx, database.InsertProvisionerJobParams{
-			ID:          uuid.New(),
-			Provisioner: database.ProvisionerTypeEcho,
+			ID:            uuid.New(),
+			Provisioner:   database.ProvisionerTypeEcho,
+			Type:          database.ProvisionerJobTypeTemplateVersionImport,
+			StorageMethod: database.ProvisionerStorageMethodFile,
 		})
 		require.NoError(t, err)
 		_, err = srv.Database.AcquireProvisionerJob(ctx, database.AcquireProvisionerJobParams{
@@ -349,7 +405,7 @@ func TestUpdateJob(t *testing.T) {
 
 	t.Run("Success", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
+		srv := setup(t, false)
 		job := setupJob(t, srv)
 		_, err := srv.UpdateJob(ctx, &proto.UpdateJobRequest{
 			JobId: job.String(),
@@ -359,7 +415,7 @@ func TestUpdateJob(t *testing.T) {
 
 	t.Run("Logs", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
+		srv := setup(t, false)
 		job := setupJob(t, srv)
 
 		published := make(chan struct{})
@@ -384,7 +440,7 @@ func TestUpdateJob(t *testing.T) {
 	})
 	t.Run("Readme", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
+		srv := setup(t, false)
 		job := setupJob(t, srv)
 		version, err := srv.Database.InsertTemplateVersion(ctx, database.InsertTemplateVersionParams{
 			ID:    uuid.New(),
@@ -401,6 +457,98 @@ func TestUpdateJob(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "# hello world", version.Readme)
 	})
+
+	t.Run("TemplateVariables", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("Valid", func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+			defer cancel()
+
+			srv := setup(t, false)
+			job := setupJob(t, srv)
+			version, err := srv.Database.InsertTemplateVersion(ctx, database.InsertTemplateVersionParams{
+				ID:    uuid.New(),
+				JobID: job,
+			})
+			require.NoError(t, err)
+			firstTemplateVariable := &sdkproto.TemplateVariable{
+				Name:         "first",
+				Type:         "string",
+				DefaultValue: "default_value",
+				Sensitive:    true,
+			}
+			secondTemplateVariable := &sdkproto.TemplateVariable{
+				Name:      "second",
+				Type:      "string",
+				Required:  true,
+				Sensitive: true,
+			}
+			response, err := srv.UpdateJob(ctx, &proto.UpdateJobRequest{
+				JobId: job.String(),
+				TemplateVariables: []*sdkproto.TemplateVariable{
+					firstTemplateVariable,
+					secondTemplateVariable,
+				},
+				UserVariableValues: []*sdkproto.VariableValue{
+					{
+						Name:  "second",
+						Value: "foobar",
+					},
+				},
+			})
+			require.NoError(t, err)
+			require.Len(t, response.VariableValues, 2)
+
+			templateVariables, err := srv.Database.GetTemplateVersionVariables(ctx, version.ID)
+			require.NoError(t, err)
+			require.Len(t, templateVariables, 2)
+			require.Equal(t, templateVariables[0].Value, firstTemplateVariable.DefaultValue)
+			require.Equal(t, templateVariables[1].Value, "foobar")
+		})
+
+		t.Run("Missing required value", func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+			defer cancel()
+
+			srv := setup(t, false)
+			job := setupJob(t, srv)
+			version, err := srv.Database.InsertTemplateVersion(ctx, database.InsertTemplateVersionParams{
+				ID:    uuid.New(),
+				JobID: job,
+			})
+			require.NoError(t, err)
+			firstTemplateVariable := &sdkproto.TemplateVariable{
+				Name:         "first",
+				Type:         "string",
+				DefaultValue: "default_value",
+				Sensitive:    true,
+			}
+			secondTemplateVariable := &sdkproto.TemplateVariable{
+				Name:      "second",
+				Type:      "string",
+				Required:  true,
+				Sensitive: true,
+			}
+			response, err := srv.UpdateJob(ctx, &proto.UpdateJobRequest{
+				JobId: job.String(),
+				TemplateVariables: []*sdkproto.TemplateVariable{
+					firstTemplateVariable,
+					secondTemplateVariable,
+				},
+			})
+			require.Error(t, err) // required template variables need values
+			require.Nil(t, response)
+
+			// Even though there is an error returned, variables are stored in the database
+			// to show the schema in the site UI.
+			templateVariables, err := srv.Database.GetTemplateVersionVariables(ctx, version.ID)
+			require.NoError(t, err)
+			require.Len(t, templateVariables, 2)
+			require.Equal(t, templateVariables[0].Value, firstTemplateVariable.DefaultValue)
+			require.Equal(t, templateVariables[1].Value, "")
+		})
+	})
 }
 
 func TestFailJob(t *testing.T) {
@@ -408,7 +556,7 @@ func TestFailJob(t *testing.T) {
 	ctx := context.Background()
 	t.Run("NotFound", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
+		srv := setup(t, false)
 		_, err := srv.FailJob(ctx, &proto.FailedJob{
 			JobId: "hello",
 		})
@@ -422,10 +570,12 @@ func TestFailJob(t *testing.T) {
 	// This test prevents runners from updating jobs they don't own!
 	t.Run("NotOwner", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
+		srv := setup(t, false)
 		job, err := srv.Database.InsertProvisionerJob(ctx, database.InsertProvisionerJobParams{
-			ID:          uuid.New(),
-			Provisioner: database.ProvisionerTypeEcho,
+			ID:            uuid.New(),
+			Provisioner:   database.ProvisionerTypeEcho,
+			StorageMethod: database.ProvisionerStorageMethodFile,
+			Type:          database.ProvisionerJobTypeTemplateVersionImport,
 		})
 		require.NoError(t, err)
 		_, err = srv.Database.AcquireProvisionerJob(ctx, database.AcquireProvisionerJobParams{
@@ -443,10 +593,12 @@ func TestFailJob(t *testing.T) {
 	})
 	t.Run("AlreadyCompleted", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
+		srv := setup(t, false)
 		job, err := srv.Database.InsertProvisionerJob(ctx, database.InsertProvisionerJobParams{
-			ID:          uuid.New(),
-			Provisioner: database.ProvisionerTypeEcho,
+			ID:            uuid.New(),
+			Provisioner:   database.ProvisionerTypeEcho,
+			Type:          database.ProvisionerJobTypeTemplateVersionImport,
+			StorageMethod: database.ProvisionerStorageMethodFile,
 		})
 		require.NoError(t, err)
 		_, err = srv.Database.AcquireProvisionerJob(ctx, database.AcquireProvisionerJobParams{
@@ -472,9 +624,20 @@ func TestFailJob(t *testing.T) {
 	})
 	t.Run("WorkspaceBuild", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
-		build, err := srv.Database.InsertWorkspaceBuild(ctx, database.InsertWorkspaceBuildParams{
+		// Ignore log errors because we get:
+		//
+		//	(*Server).FailJob       audit log - get build {"error": "sql: no rows in result set"}
+		ignoreLogErrors := true
+		srv := setup(t, ignoreLogErrors)
+		workspace, err := srv.Database.InsertWorkspace(ctx, database.InsertWorkspaceParams{
 			ID: uuid.New(),
+		})
+		require.NoError(t, err)
+		build, err := srv.Database.InsertWorkspaceBuild(ctx, database.InsertWorkspaceBuildParams{
+			ID:          uuid.New(),
+			WorkspaceID: workspace.ID,
+			Transition:  database.WorkspaceTransitionStart,
+			Reason:      database.BuildReasonInitiator,
 		})
 		require.NoError(t, err)
 		input, err := json.Marshal(provisionerdserver.WorkspaceProvisionJob{
@@ -482,9 +645,11 @@ func TestFailJob(t *testing.T) {
 		})
 		require.NoError(t, err)
 		job, err := srv.Database.InsertProvisionerJob(ctx, database.InsertProvisionerJobParams{
-			ID:          uuid.New(),
-			Provisioner: database.ProvisionerTypeEcho,
-			Input:       input,
+			ID:            uuid.New(),
+			Input:         input,
+			Provisioner:   database.ProvisionerTypeEcho,
+			Type:          database.ProvisionerJobTypeWorkspaceBuild,
+			StorageMethod: database.ProvisionerStorageMethodFile,
 		})
 		require.NoError(t, err)
 		_, err = srv.Database.AcquireProvisionerJob(ctx, database.AcquireProvisionerJobParams{
@@ -531,7 +696,7 @@ func TestCompleteJob(t *testing.T) {
 	ctx := context.Background()
 	t.Run("NotFound", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
+		srv := setup(t, false)
 		_, err := srv.CompleteJob(ctx, &proto.CompletedJob{
 			JobId: "hello",
 		})
@@ -545,10 +710,12 @@ func TestCompleteJob(t *testing.T) {
 	// This test prevents runners from updating jobs they don't own!
 	t.Run("NotOwner", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
+		srv := setup(t, false)
 		job, err := srv.Database.InsertProvisionerJob(ctx, database.InsertProvisionerJobParams{
-			ID:          uuid.New(),
-			Provisioner: database.ProvisionerTypeEcho,
+			ID:            uuid.New(),
+			Provisioner:   database.ProvisionerTypeEcho,
+			StorageMethod: database.ProvisionerStorageMethodFile,
+			Type:          database.ProvisionerJobTypeWorkspaceBuild,
 		})
 		require.NoError(t, err)
 		_, err = srv.Database.AcquireProvisionerJob(ctx, database.AcquireProvisionerJobParams{
@@ -566,10 +733,13 @@ func TestCompleteJob(t *testing.T) {
 	})
 	t.Run("TemplateImport", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
+		srv := setup(t, false)
 		job, err := srv.Database.InsertProvisionerJob(ctx, database.InsertProvisionerJobParams{
-			ID:          uuid.New(),
-			Provisioner: database.ProvisionerTypeEcho,
+			ID:            uuid.New(),
+			Provisioner:   database.ProvisionerTypeEcho,
+			Input:         []byte(`{"template_version_id": "` + uuid.NewString() + `"}`),
+			StorageMethod: database.ProvisionerStorageMethodFile,
+			Type:          database.ProvisionerJobTypeWorkspaceBuild,
 		})
 		require.NoError(t, err)
 		_, err = srv.Database.AcquireProvisionerJob(ctx, database.AcquireProvisionerJobParams{
@@ -596,7 +766,7 @@ func TestCompleteJob(t *testing.T) {
 	})
 	t.Run("WorkspaceBuild", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
+		srv := setup(t, false)
 		workspace, err := srv.Database.InsertWorkspace(ctx, database.InsertWorkspaceParams{
 			ID: uuid.New(),
 		})
@@ -605,6 +775,7 @@ func TestCompleteJob(t *testing.T) {
 			ID:          uuid.New(),
 			WorkspaceID: workspace.ID,
 			Transition:  database.WorkspaceTransitionDelete,
+			Reason:      database.BuildReasonInitiator,
 		})
 		require.NoError(t, err)
 		input, err := json.Marshal(provisionerdserver.WorkspaceProvisionJob{
@@ -612,9 +783,11 @@ func TestCompleteJob(t *testing.T) {
 		})
 		require.NoError(t, err)
 		job, err := srv.Database.InsertProvisionerJob(ctx, database.InsertProvisionerJobParams{
-			ID:          uuid.New(),
-			Provisioner: database.ProvisionerTypeEcho,
-			Input:       input,
+			ID:            uuid.New(),
+			Provisioner:   database.ProvisionerTypeEcho,
+			Input:         input,
+			Type:          database.ProvisionerJobTypeWorkspaceBuild,
+			StorageMethod: database.ProvisionerStorageMethodFile,
 		})
 		require.NoError(t, err)
 		_, err = srv.Database.AcquireProvisionerJob(ctx, database.AcquireProvisionerJobParams{
@@ -663,10 +836,12 @@ func TestCompleteJob(t *testing.T) {
 
 	t.Run("TemplateDryRun", func(t *testing.T) {
 		t.Parallel()
-		srv := setup(t)
+		srv := setup(t, false)
 		job, err := srv.Database.InsertProvisionerJob(ctx, database.InsertProvisionerJobParams{
-			ID:          uuid.New(),
-			Provisioner: database.ProvisionerTypeEcho,
+			ID:            uuid.New(),
+			Provisioner:   database.ProvisionerTypeEcho,
+			Type:          database.ProvisionerJobTypeTemplateVersionDryRun,
+			StorageMethod: database.ProvisionerStorageMethodFile,
 		})
 		require.NoError(t, err)
 		_, err = srv.Database.AcquireProvisionerJob(ctx, database.AcquireProvisionerJobParams{
@@ -701,7 +876,7 @@ func TestInsertWorkspaceResource(t *testing.T) {
 	}
 	t.Run("NoAgents", func(t *testing.T) {
 		t.Parallel()
-		db := databasefake.New()
+		db := dbfake.New()
 		job := uuid.New()
 		err := insert(db, job, &sdkproto.Resource{
 			Name: "something",
@@ -714,7 +889,7 @@ func TestInsertWorkspaceResource(t *testing.T) {
 	})
 	t.Run("InvalidAgentToken", func(t *testing.T) {
 		t.Parallel()
-		err := insert(databasefake.New(), uuid.New(), &sdkproto.Resource{
+		err := insert(dbfake.New(), uuid.New(), &sdkproto.Resource{
 			Name: "something",
 			Type: "aws_instance",
 			Agents: []*sdkproto.Agent{{
@@ -727,7 +902,7 @@ func TestInsertWorkspaceResource(t *testing.T) {
 	})
 	t.Run("DuplicateApps", func(t *testing.T) {
 		t.Parallel()
-		err := insert(databasefake.New(), uuid.New(), &sdkproto.Resource{
+		err := insert(dbfake.New(), uuid.New(), &sdkproto.Resource{
 			Name: "something",
 			Type: "aws_instance",
 			Agents: []*sdkproto.Agent{{
@@ -742,11 +917,12 @@ func TestInsertWorkspaceResource(t *testing.T) {
 	})
 	t.Run("Success", func(t *testing.T) {
 		t.Parallel()
-		db := databasefake.New()
+		db := dbfake.New()
 		job := uuid.New()
 		err := insert(db, job, &sdkproto.Resource{
-			Name: "something",
-			Type: "aws_instance",
+			Name:      "something",
+			Type:      "aws_instance",
+			DailyCost: 10,
 			Agents: []*sdkproto.Agent{{
 				Name: "dev",
 				Env: map[string]string{
@@ -767,6 +943,7 @@ func TestInsertWorkspaceResource(t *testing.T) {
 		resources, err := db.GetWorkspaceResourcesByJobID(ctx, job)
 		require.NoError(t, err)
 		require.Len(t, resources, 1)
+		require.EqualValues(t, 10, resources[0].DailyCost)
 		agents, err := db.GetWorkspaceAgentsByResourceIDs(ctx, []uuid.UUID{resources[0].ID})
 		require.NoError(t, err)
 		require.Len(t, agents, 1)
@@ -784,18 +961,26 @@ func TestInsertWorkspaceResource(t *testing.T) {
 	})
 }
 
-func setup(t *testing.T) *provisionerdserver.Server {
+func setup(t *testing.T, ignoreLogErrors bool) *provisionerdserver.Server {
 	t.Helper()
-	db := databasefake.New()
+	db := dbfake.New()
 	pubsub := database.NewPubsubInMemory()
 
 	return &provisionerdserver.Server{
 		ID:           uuid.New(),
-		Logger:       slogtest.Make(t, nil),
+		Logger:       slogtest.Make(t, &slogtest.Options{IgnoreErrors: ignoreLogErrors}),
 		AccessURL:    &url.URL{},
 		Provisioners: []database.ProvisionerType{database.ProvisionerTypeEcho},
 		Database:     db,
 		Pubsub:       pubsub,
 		Telemetry:    telemetry.NewNoop(),
+		Auditor:      mockAuditor(),
 	}
+}
+
+func must[T any](value T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return value
 }

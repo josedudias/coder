@@ -1,6 +1,6 @@
 import axios, { AxiosError, AxiosResponse } from "axios"
 
-export const Language = {
+const Language = {
   errorsByCode: {
     defaultErrorCode: "Invalid value",
   },
@@ -61,6 +61,10 @@ export const mapApiErrorToFieldErrors = (
   }
 
   return result
+}
+
+export const isApiValidationError = (error: unknown): error is ApiError => {
+  return isApiError(error) && hasApiFieldErrors(error)
 }
 
 /**

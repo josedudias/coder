@@ -1,8 +1,4 @@
-import {
-  hasApiFieldErrors,
-  isApiError,
-  mapApiErrorToFieldErrors,
-} from "api/errors"
+import { isApiValidationError, mapApiErrorToFieldErrors } from "api/errors"
 import { FormikContextType, FormikErrors, getIn } from "formik"
 import {
   ChangeEvent,
@@ -12,15 +8,18 @@ import {
 } from "react"
 import * as Yup from "yup"
 
-export const Language = {
+const Language = {
   nameRequired: (name: string): string => {
-    return `Please enter a ${name.toLowerCase()}.`
+    return name ? `Please enter a ${name.toLowerCase()}.` : "Required"
   },
   nameInvalidChars: (name: string): string => {
     return `${name} must start with a-Z or 0-9 and can contain a-Z, 0-9 or -`
   },
-  nameTooLong: (name: string): string => {
-    return `${name} cannot be longer than 32 characters`
+  nameTooLong: (name: string, len: number): string => {
+    return `${name} cannot be longer than ${len} characters`
+  },
+  templateDisplayNameInvalidChars: (name: string): string => {
+    return `${name} must start and end with non-whitespace character`
   },
 }
 
@@ -34,23 +33,24 @@ interface FormHelpers {
   helperText?: ReactNode
 }
 
-// backendErrorName can be used if the backend names a field differently than the frontend does
 export const getFormHelpers =
   <T>(form: FormikContextType<T>, error?: Error | unknown) =>
   (
-    name: keyof T,
+    name: string,
     HelperText: ReactNode = "",
     backendErrorName?: string,
   ): FormHelpers => {
-    const apiValidationErrors =
-      isApiError(error) && hasApiFieldErrors(error)
-        ? (mapApiErrorToFieldErrors(error.response.data) as FormikErrors<T>)
-        : error
+    const apiValidationErrors = isApiValidationError(error)
+      ? (mapApiErrorToFieldErrors(error.response.data) as FormikErrors<T>)
+      : // This should not return the error since it is not and api validation error but I didn't have time to fix this and tests
+        error
+
     if (typeof name !== "string") {
       throw new Error(
         `name must be type of string, instead received '${typeof name}'`,
       )
     }
+
     const apiErrorName = backendErrorName ?? name
 
     // getIn is a util function from Formik that gets at any depth of nesting
@@ -59,6 +59,7 @@ export const getFormHelpers =
     const apiError = getIn(apiValidationErrors, apiErrorName)
     const frontendError = getIn(form.errors, name)
     const returnError = apiError ?? frontendError
+
     return {
       ...form.getFieldProps(name),
       id: name,
@@ -74,15 +75,28 @@ export const onChangeTrimmed =
     form.handleChange(event)
   }
 
-// REMARK: Keep in sync with coderd/httpapi/httpapi.go#L40
+// REMARK: Keep these consts in sync with coderd/httpapi/httpapi.go
 const maxLenName = 32
-
-// REMARK: Keep in sync with coderd/httpapi/httpapi.go#L18
+const templateDisplayNameMaxLength = 64
 const usernameRE = /^[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*$/
+const templateDisplayNameRE = /^[^\s](.*[^\s])?$/
 
 // REMARK: see #1756 for name/username semantics
 export const nameValidator = (name: string): Yup.StringSchema =>
   Yup.string()
     .required(Language.nameRequired(name))
     .matches(usernameRE, Language.nameInvalidChars(name))
-    .max(maxLenName, Language.nameTooLong(name))
+    .max(maxLenName, Language.nameTooLong(name, maxLenName))
+
+export const templateDisplayNameValidator = (
+  displayName: string,
+): Yup.StringSchema =>
+  Yup.string()
+    .matches(
+      templateDisplayNameRE,
+      Language.templateDisplayNameInvalidChars(displayName),
+    )
+    .max(
+      templateDisplayNameMaxLength,
+      Language.nameTooLong(displayName, templateDisplayNameMaxLength),
+    )

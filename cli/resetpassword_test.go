@@ -28,8 +28,8 @@ func TestResetPassword(t *testing.T) {
 
 	const email = "some@one.com"
 	const username = "example"
-	const oldPassword = "password"
-	const newPassword = "password2"
+	const oldPassword = "MyOldPassword!"
+	const newPassword = "MyNewPassword!"
 
 	// start postgres and coder server processes
 
@@ -40,7 +40,7 @@ func TestResetPassword(t *testing.T) {
 	serverDone := make(chan struct{})
 	serverCmd, cfg := clitest.New(t,
 		"server",
-		"--address", ":0",
+		"--http-address", ":0",
 		"--access-url", "http://example.com",
 		"--postgres-url", connectionURL,
 		"--cache-dir", t.TempDir(),
@@ -60,10 +60,9 @@ func TestResetPassword(t *testing.T) {
 	client := codersdk.New(accessURL)
 
 	_, err = client.CreateFirstUser(ctx, codersdk.CreateFirstUserRequest{
-		Email:            email,
-		Username:         username,
-		Password:         oldPassword,
-		OrganizationName: "example",
+		Email:    email,
+		Username: username,
+		Password: oldPassword,
 	})
 	require.NoError(t, err)
 

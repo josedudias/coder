@@ -1,143 +1,119 @@
-import { makeStyles, Theme } from "@material-ui/core/styles"
+import TableCell from "@material-ui/core/TableCell"
+import { makeStyles } from "@material-ui/core/styles"
 import TableRow from "@material-ui/core/TableRow"
 import KeyboardArrowRight from "@material-ui/icons/KeyboardArrowRight"
-import useTheme from "@material-ui/styles/useTheme"
-import { useActor } from "@xstate/react"
 import { AvatarData } from "components/AvatarData/AvatarData"
 import { WorkspaceStatusBadge } from "components/WorkspaceStatusBadge/WorkspaceStatusBadge"
 import { FC } from "react"
-import { useNavigate } from "react-router-dom"
-import { WorkspaceItemMachineRef } from "../../xServices/workspaces/workspacesXService"
+import { useNavigate, Link as RouterLink } from "react-router-dom"
+import { getDisplayWorkspaceTemplateName } from "util/workspace"
 import { LastUsed } from "../LastUsed/LastUsed"
-import {
-  TableCellData,
-  TableCellDataPrimary,
-} from "../TableCellData/TableCellData"
-import { TableCellLink } from "../TableCellLink/TableCellLink"
-import { OutdatedHelpTooltip } from "../Tooltips"
+import { Workspace } from "api/typesGenerated"
+import { OutdatedHelpTooltip } from "components/Tooltips/OutdatedHelpTooltip"
+import { Avatar } from "components/Avatar/Avatar"
+import { Stack } from "components/Stack/Stack"
+import TemplateLinkIcon from "@material-ui/icons/OpenInNewOutlined"
+import Link from "@material-ui/core/Link"
+import { useClickableTableRow } from "hooks/useClickableTableRow"
 
-const Language = {
-  upToDateLabel: "Up to date",
-  outdatedLabel: "Outdated",
-}
-
-export const WorkspacesRow: FC<
-  React.PropsWithChildren<{ workspaceRef: WorkspaceItemMachineRef }>
-> = ({ workspaceRef }) => {
+export const WorkspacesRow: FC<{
+  workspace: Workspace
+  onUpdateWorkspace: (workspace: Workspace) => void
+}> = ({ workspace, onUpdateWorkspace }) => {
   const styles = useStyles()
   const navigate = useNavigate()
-  const theme: Theme = useTheme()
-  const [workspaceState, send] = useActor(workspaceRef)
-  const { data: workspace } = workspaceState.context
   const workspacePageLink = `/@${workspace.owner_name}/${workspace.name}`
-  const hasTemplateIcon =
-    workspace.template_icon && workspace.template_icon !== ""
+  const displayTemplateName = getDisplayWorkspaceTemplateName(workspace)
+  const clickable = useClickableTableRow(() => {
+    navigate(workspacePageLink)
+  })
 
   return (
-    <TableRow
-      hover
-      data-testid={`workspace-${workspace.id}`}
-      tabIndex={0}
-      onKeyDown={(event) => {
-        if (event.key === "Enter") {
-          navigate(workspacePageLink)
-        }
-      }}
-      className={styles.clickableTableRow}
-    >
-      <TableCellLink to={workspacePageLink}>
+    <TableRow data-testid={`workspace-${workspace.id}`} {...clickable}>
+      <TableCell>
         <AvatarData
-          highlightTitle
-          title={workspace.name}
+          title={
+            <Stack direction="row" spacing={0} alignItems="center">
+              {workspace.name}
+              {workspace.outdated && (
+                <OutdatedHelpTooltip
+                  onUpdateVersion={() => {
+                    onUpdateWorkspace(workspace)
+                  }}
+                />
+              )}
+            </Stack>
+          }
           subtitle={workspace.owner_name}
           avatar={
-            hasTemplateIcon ? (
-              <div className={styles.templateIconWrapper}>
-                <img alt="" src={workspace.template_icon} />
-              </div>
-            ) : undefined
+            <Avatar
+              src={workspace.template_icon}
+              variant={workspace.template_icon ? "square" : undefined}
+              fitImage={Boolean(workspace.template_icon)}
+            >
+              {workspace.name}
+            </Avatar>
           }
         />
-      </TableCellLink>
+      </TableCell>
 
-      <TableCellLink to={workspacePageLink}>
-        <TableCellDataPrimary>{workspace.template_name}</TableCellDataPrimary>
-      </TableCellLink>
-      <TableCellLink to={workspacePageLink}>
-        <TableCellData>
-          <LastUsed lastUsedAt={workspace.last_used_at} />
-        </TableCellData>
-      </TableCellLink>
+      <TableCell>
+        <Link
+          component={RouterLink}
+          to={`/templates/${workspace.template_name}`}
+          className={styles.templateLink}
+          title={`Go to ${displayTemplateName} page`}
+          onClick={(e) => {
+            e.stopPropagation()
+          }}
+        >
+          <Stack direction="row" alignItems="center" spacing={1}>
+            <TemplateLinkIcon className={styles.templateLinkIcon} />
+            <span>{displayTemplateName}</span>
+          </Stack>
+        </Link>
+      </TableCell>
 
-      <TableCellLink to={workspacePageLink}>
-        {workspace.outdated ? (
-          <span className={styles.outdatedLabel}>
-            {Language.outdatedLabel}
-            <OutdatedHelpTooltip
-              onUpdateVersion={() => {
-                send("UPDATE_VERSION")
-              }}
-            />
-          </span>
-        ) : (
-          <span style={{ color: theme.palette.text.secondary }}>
-            {Language.upToDateLabel}
-          </span>
-        )}
-      </TableCellLink>
+      <TableCell>
+        <LastUsed lastUsedAt={workspace.last_used_at} />
+      </TableCell>
 
-      <TableCellLink to={workspacePageLink}>
+      <TableCell>
         <WorkspaceStatusBadge build={workspace.latest_build} />
-      </TableCellLink>
-      <TableCellLink to={workspacePageLink}>
+      </TableCell>
+
+      <TableCell>
         <div className={styles.arrowCell}>
           <KeyboardArrowRight className={styles.arrowRight} />
         </div>
-      </TableCellLink>
+      </TableCell>
     </TableRow>
   )
 }
 
 const useStyles = makeStyles((theme) => ({
-  clickableTableRow: {
-    "&:hover td": {
-      backgroundColor: theme.palette.action.hover,
-    },
-
-    "&:focus": {
-      outline: `1px solid ${theme.palette.secondary.dark}`,
-    },
-
-    "& .MuiTableCell-root:last-child": {
-      paddingRight: theme.spacing(2),
-    },
-  },
   arrowRight: {
     color: theme.palette.text.secondary,
     width: 20,
     height: 20,
   },
+
   arrowCell: {
     display: "flex",
+    paddingLeft: theme.spacing(2),
   },
-  outdatedLabel: {
-    color: theme.palette.error.main,
-    display: "flex",
-    alignItems: "center",
-    gap: theme.spacing(0.5),
-  },
-  buildTime: {
-    color: theme.palette.text.secondary,
-    fontSize: 12,
-  },
-  templateIconWrapper: {
-    // Same size then the avatar component
-    width: 36,
-    height: 36,
-    padding: 2,
 
-    "& img": {
-      width: "100%",
+  templateLink: {
+    color: theme.palette.text.secondary,
+
+    "&:hover": {
+      color: theme.palette.text.primary,
+      textDecoration: "none",
     },
+  },
+
+  templateLinkIcon: {
+    width: theme.spacing(1.5),
+    height: theme.spacing(1.5),
   },
 }))

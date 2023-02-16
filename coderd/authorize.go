@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
-
 	"golang.org/x/xerrors"
 
 	"cdr.dev/slog"
@@ -20,14 +19,15 @@ import (
 // This is faster than calling Authorize() on each object.
 func AuthorizeFilter[O rbac.Objecter](h *HTTPAuthorizer, r *http.Request, action rbac.Action, objects []O) ([]O, error) {
 	roles := httpmw.UserAuthorization(r)
-	objects, err := rbac.Filter(r.Context(), h.Authorizer, roles.ID.String(), roles.Roles, roles.Scope.ToRBAC(), roles.Groups, action, objects)
+	objects, err := rbac.Filter(r.Context(), h.Authorizer, roles.Actor, action, objects)
 	if err != nil {
 		// Log the error as Filter should not be erroring.
 		h.Logger.Error(r.Context(), "filter failed",
 			slog.Error(err),
-			slog.F("user_id", roles.ID),
+			slog.F("user_id", roles.Actor.ID),
 			slog.F("username", roles.Username),
-			slog.F("scope", roles.Scope),
+			slog.F("roles", roles.Actor.SafeRoleNames()),
+			slog.F("scope", roles.Actor.SafeScopeName()),
 			slog.F("route", r.URL.Path),
 			slog.F("action", action),
 		)
@@ -51,6 +51,28 @@ type HTTPAuthorizer struct {
 //		return
 //	}
 func (api *API) Authorize(r *http.Request, action rbac.Action, object rbac.Objecter) bool {
+	// The experiment does not replace ALL rbac checks, but does replace most.
+	// This statement aborts early on the checks that will be removed in the
+	// future when this experiment is default.
+	if api.Experiments.Enabled(codersdk.ExperimentAuthzQuerier) {
+		// Some resource types do not interact with the persistent layer and
+		// we need to keep these checks happening in the API layer.
+		switch object.RBACObject().Type {
+		case rbac.ResourceWorkspaceExecution.Type:
+			// This is not a db resource, always in API layer
+		case rbac.ResourceDeploymentConfig.Type:
+			// For metric cache items like DAU, we do not hit the DB.
+			// Some db actions are in asserted in the authz layer.
+		case rbac.ResourceReplicas.Type:
+			// Replica rbac is checked for adding and removing replicas.
+		case rbac.ResourceProvisionerDaemon.Type:
+			// Provisioner rbac is checked for adding and removing provisioners.
+		case rbac.ResourceDebugInfo.Type:
+			// This is not a db resource, always in API layer.
+		default:
+			return true
+		}
+	}
 	return api.HTTPAuth.Authorize(r, action, object)
 }
 
@@ -65,7 +87,7 @@ func (api *API) Authorize(r *http.Request, action rbac.Action, object rbac.Objec
 //	}
 func (h *HTTPAuthorizer) Authorize(r *http.Request, action rbac.Action, object rbac.Objecter) bool {
 	roles := httpmw.UserAuthorization(r)
-	err := h.Authorizer.ByRoleName(r.Context(), roles.ID.String(), roles.Roles, roles.Scope.ToRBAC(), roles.Groups, action, object.RBACObject())
+	err := h.Authorizer.Authorize(r.Context(), roles.Actor, action, object.RBACObject())
 	if err != nil {
 		// Log the errors for debugging
 		internalError := new(rbac.UnauthorizedError)
@@ -76,10 +98,10 @@ func (h *HTTPAuthorizer) Authorize(r *http.Request, action rbac.Action, object r
 		// Log information for debugging. This will be very helpful
 		// in the early days
 		logger.Warn(r.Context(), "unauthorized",
-			slog.F("roles", roles.Roles),
-			slog.F("user_id", roles.ID),
+			slog.F("roles", roles.Actor.SafeRoleNames()),
+			slog.F("user_id", roles.Actor.ID),
 			slog.F("username", roles.Username),
-			slog.F("scope", roles.Scope),
+			slog.F("scope", roles.Actor.SafeScopeName()),
 			slog.F("route", r.URL.Path),
 			slog.F("action", action),
 			slog.F("object", object),
@@ -95,23 +117,28 @@ func (h *HTTPAuthorizer) Authorize(r *http.Request, action rbac.Action, object r
 // from postgres are already authorized, and the caller does not need to
 // call 'Authorize()' on the returned objects.
 // Note the authorization is only for the given action and object type.
-func (h *HTTPAuthorizer) AuthorizeSQLFilter(r *http.Request, action rbac.Action, objectType string) (rbac.AuthorizeFilter, error) {
+func (h *HTTPAuthorizer) AuthorizeSQLFilter(r *http.Request, action rbac.Action, objectType string) (rbac.PreparedAuthorized, error) {
 	roles := httpmw.UserAuthorization(r)
-	prepared, err := h.Authorizer.PrepareByRoleName(r.Context(), roles.ID.String(), roles.Roles, roles.Scope.ToRBAC(), roles.Groups, action, objectType)
+	prepared, err := h.Authorizer.Prepare(r.Context(), roles.Actor, action, objectType)
 	if err != nil {
 		return nil, xerrors.Errorf("prepare filter: %w", err)
 	}
 
-	filter, err := prepared.Compile()
-	if err != nil {
-		return nil, xerrors.Errorf("compile filter: %w", err)
-	}
-
-	return filter, nil
+	return prepared, nil
 }
 
 // checkAuthorization returns if the current API key can use the given
 // permissions, factoring in the current user's roles and the API key scopes.
+//
+// @Summary Check authorization
+// @ID check-authorization
+// @Security CoderSessionToken
+// @Accept json
+// @Produce json
+// @Tags Authorization
+// @Param request body codersdk.AuthorizationRequest true "Authorization request"
+// @Success 200 {object} codersdk.AuthorizationResponse
+// @Router /authcheck [post]
 func (api *API) checkAuthorization(rw http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	auth := httpmw.UserAuthorization(r)
@@ -123,9 +150,10 @@ func (api *API) checkAuthorization(rw http.ResponseWriter, r *http.Request) {
 
 	api.Logger.Debug(ctx, "check-auth",
 		slog.F("my_id", httpmw.APIKey(r).UserID),
-		slog.F("got_id", auth.ID),
+		slog.F("got_id", auth.Actor.ID),
 		slog.F("name", auth.Username),
-		slog.F("roles", auth.Roles), slog.F("scope", auth.Scope),
+		slog.F("roles", auth.Actor.SafeRoleNames()),
+		slog.F("scope", auth.Actor.SafeScopeName()),
 	)
 
 	response := make(codersdk.AuthorizationResponse)
@@ -165,7 +193,7 @@ func (api *API) checkAuthorization(rw http.ResponseWriter, r *http.Request) {
 			Type:  v.Object.ResourceType,
 		}
 		if obj.Owner == "me" {
-			obj.Owner = auth.ID.String()
+			obj.Owner = auth.Actor.ID
 		}
 
 		// If a resource ID is specified, fetch that specific resource.
@@ -198,9 +226,10 @@ func (api *API) checkAuthorization(rw http.ResponseWriter, r *http.Request) {
 			case rbac.ResourceGroup.Type:
 				dbObj, dbErr = api.Database.GetGroupByID(ctx, id)
 			default:
+				msg := fmt.Sprintf("Object type %q does not support \"resource_id\" field.", v.Object.ResourceType)
 				httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
-					Message:     fmt.Sprintf("Object type %q does not support \"resource_id\" field.", v.Object.ResourceType),
-					Validations: []codersdk.ValidationError{{Field: "resource_type", Detail: err.Error()}},
+					Message:     msg,
+					Validations: []codersdk.ValidationError{{Field: "resource_type", Detail: msg}},
 				})
 				return
 			}
@@ -212,7 +241,7 @@ func (api *API) checkAuthorization(rw http.ResponseWriter, r *http.Request) {
 			obj = dbObj.RBACObject()
 		}
 
-		err := api.Authorizer.ByRoleName(r.Context(), auth.ID.String(), auth.Roles, auth.Scope.ToRBAC(), auth.Groups, rbac.Action(v.Action), obj)
+		err := api.Authorizer.Authorize(ctx, auth.Actor, rbac.Action(v.Action), obj)
 		response[k] = err == nil
 	}
 

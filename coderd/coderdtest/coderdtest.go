@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -34,6 +35,7 @@ import (
 	"github.com/golang-jwt/jwt"
 	"github.com/google/uuid"
 	"github.com/moby/moby/pkg/namesgenerator"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/afero"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
@@ -57,6 +59,7 @@ import (
 	"github.com/coder/coder/coderd/autobuild/executor"
 	"github.com/coder/coder/coderd/awsidentity"
 	"github.com/coder/coder/coderd/database"
+	"github.com/coder/coder/coderd/database/dbauthz"
 	"github.com/coder/coder/coderd/database/dbtestutil"
 	"github.com/coder/coder/coderd/gitauth"
 	"github.com/coder/coder/coderd/gitsshkey"
@@ -64,12 +67,14 @@ import (
 	"github.com/coder/coder/coderd/httpmw"
 	"github.com/coder/coder/coderd/rbac"
 	"github.com/coder/coder/coderd/telemetry"
+	"github.com/coder/coder/coderd/updatecheck"
 	"github.com/coder/coder/coderd/util/ptr"
 	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/codersdk/agentsdk"
 	"github.com/coder/coder/cryptorand"
 	"github.com/coder/coder/provisioner/echo"
 	"github.com/coder/coder/provisionerd"
-	"github.com/coder/coder/provisionerd/proto"
+	provisionerdproto "github.com/coder/coder/provisionerd/proto"
 	"github.com/coder/coder/provisionersdk"
 	sdkproto "github.com/coder/coder/provisionersdk/proto"
 	"github.com/coder/coder/tailnet"
@@ -77,23 +82,30 @@ import (
 )
 
 type Options struct {
+	// AccessURL denotes a custom access URL. By default we use the httptest
+	// server's URL. Setting this may result in unexpected behavior (especially
+	// with running agents).
+	AccessURL            *url.URL
 	AppHostname          string
 	AWSCertificates      awsidentity.Certificates
 	Authorizer           rbac.Authorizer
-	Experimental         bool
 	AzureCertificates    x509.VerifyOptions
 	GithubOAuth2Config   *coderd.GithubOAuth2Config
 	RealIPConfig         *httpmw.RealIPConfig
 	OIDCConfig           *coderd.OIDCConfig
 	GoogleTokenValidator *idtoken.Validator
 	SSHKeygenAlgorithm   gitsshkey.Algorithm
-	APIRateLimit         int
-	AutoImportTemplates  []coderd.AutoImportTemplate
 	AutobuildTicker      <-chan time.Time
 	AutobuildStats       chan<- executor.Stats
 	Auditor              audit.Auditor
 	TLSCertificates      []tls.Certificate
 	GitAuthConfigs       []*gitauth.Config
+	TrialGenerator       func(context.Context, string) error
+
+	// All rate limits default to -1 (unlimited) in tests if not set.
+	APIRateLimit   int
+	LoginRateLimit int
+	FilesRateLimit int
 
 	// IncludeProvisionerDaemon when true means to start an in-memory provisionerD
 	IncludeProvisionerDaemon    bool
@@ -101,11 +113,16 @@ type Options struct {
 	AgentStatsRefreshInterval   time.Duration
 	DeploymentConfig            *codersdk.DeploymentConfig
 
+	// Set update check options to enable update check.
+	UpdateCheckOptions *updatecheck.Options
+
 	// Overriding the database is heavily discouraged.
 	// It should only be used in cases where multiple Coder
 	// test instances are running against the same database.
 	Database database.Store
 	Pubsub   database.Pubsub
+
+	SwaggerEndpoint bool
 }
 
 // New constructs a codersdk client connected to an in-memory API instance.
@@ -139,7 +156,7 @@ func newWithCloser(t *testing.T, options *Options) (*codersdk.Client, io.Closer)
 	return client, closer
 }
 
-func NewOptions(t *testing.T, options *Options) (func(http.Handler), context.CancelFunc, *coderd.Options) {
+func NewOptions(t *testing.T, options *Options) (func(http.Handler), context.CancelFunc, *url.URL, *coderd.Options) {
 	if options == nil {
 		options = &Options{}
 	}
@@ -163,8 +180,28 @@ func NewOptions(t *testing.T, options *Options) (func(http.Handler), context.Can
 	if options.Database == nil {
 		options.Database, options.Pubsub = dbtestutil.NewDB(t)
 	}
+	// TODO: remove this once we're ready to enable authz querier by default.
+	if strings.Contains(os.Getenv("CODER_EXPERIMENTS_TEST"), string(codersdk.ExperimentAuthzQuerier)) {
+		if options.Authorizer == nil {
+			options.Authorizer = &RecordingAuthorizer{
+				Wrapped: rbac.NewCachingAuthorizer(prometheus.NewRegistry()),
+			}
+		}
+		options.Database = dbauthz.New(options.Database, options.Authorizer, slogtest.Make(t, nil).Leveled(slog.LevelDebug))
+	}
 	if options.DeploymentConfig == nil {
 		options.DeploymentConfig = DeploymentConfig(t)
+	}
+
+	// If no ratelimits are set, disable all rate limiting for tests.
+	if options.APIRateLimit == 0 {
+		options.APIRateLimit = -1
+	}
+	if options.LoginRateLimit == 0 {
+		options.LoginRateLimit = -1
+	}
+	if options.FilesRateLimit == 0 {
+		options.FilesRateLimit = -1
 	}
 
 	ctx, cancelFunc := context.WithCancel(context.Background())
@@ -209,6 +246,11 @@ func NewOptions(t *testing.T, options *Options) (func(http.Handler), context.Can
 	derpPort, err := strconv.Atoi(serverURL.Port())
 	require.NoError(t, err)
 
+	accessURL := options.AccessURL
+	if accessURL == nil {
+		accessURL = serverURL
+	}
+
 	stunAddr, stunCleanup := stuntest.ServeWithPacketListener(t, nettype.Std{})
 	t.Cleanup(stunCleanup)
 
@@ -231,12 +273,12 @@ func NewOptions(t *testing.T, options *Options) (func(http.Handler), context.Can
 			mutex.Lock()
 			defer mutex.Unlock()
 			handler = h
-		}, cancelFunc, &coderd.Options{
+		}, cancelFunc, serverURL, &coderd.Options{
 			AgentConnectionUpdateFrequency: 150 * time.Millisecond,
 			// Force a long disconnection timeout to ensure
 			// agents are not marked as disconnected during slow tests.
 			AgentInactiveDisconnectTimeout: testutil.WaitShort,
-			AccessURL:                      serverURL,
+			AccessURL:                      accessURL,
 			AppHostname:                    options.AppHostname,
 			AppHostnameRegex:               appHostnameRegex,
 			Logger:                         slogtest.Make(t, nil).Leveled(slog.LevelDebug),
@@ -255,9 +297,12 @@ func NewOptions(t *testing.T, options *Options) (func(http.Handler), context.Can
 			SSHKeygenAlgorithm:   options.SSHKeygenAlgorithm,
 			DERPServer:           derpServer,
 			APIRateLimit:         options.APIRateLimit,
+			LoginRateLimit:       options.LoginRateLimit,
+			FilesRateLimit:       options.FilesRateLimit,
 			Authorizer:           options.Authorizer,
 			Telemetry:            telemetry.NewNoop(),
 			TLSCertificates:      options.TLSCertificates,
+			TrialGenerator:       options.TrialGenerator,
 			DERPMap: &tailcfg.DERPMap{
 				Regions: map[int]*tailcfg.DERPRegion{
 					1: {
@@ -277,10 +322,11 @@ func NewOptions(t *testing.T, options *Options) (func(http.Handler), context.Can
 					},
 				},
 			},
-			AutoImportTemplates:         options.AutoImportTemplates,
 			MetricsCacheRefreshInterval: options.MetricsCacheRefreshInterval,
 			AgentStatsRefreshInterval:   options.AgentStatsRefreshInterval,
 			DeploymentConfig:            options.DeploymentConfig,
+			UpdateCheckOptions:          options.UpdateCheckOptions,
+			SwaggerEndpoint:             options.SwaggerEndpoint,
 		}
 }
 
@@ -291,7 +337,7 @@ func NewWithAPI(t *testing.T, options *Options) (*codersdk.Client, io.Closer, *c
 	if options == nil {
 		options = &Options{}
 	}
-	setHandler, cancelFunc, newOptions := NewOptions(t, options)
+	setHandler, cancelFunc, serverURL, newOptions := NewOptions(t, options)
 	// We set the handler after server creation for the access URL.
 	coderAPI := coderd.New(newOptions)
 	setHandler(coderAPI.RootHandler)
@@ -299,7 +345,7 @@ func NewWithAPI(t *testing.T, options *Options) (*codersdk.Client, io.Closer, *c
 	if options.IncludeProvisionerDaemon {
 		provisionerCloser = NewProvisionerDaemon(t, coderAPI)
 	}
-	client := codersdk.New(coderAPI.AccessURL)
+	client := codersdk.New(serverURL)
 	t.Cleanup(func() {
 		cancelFunc()
 		_ = provisionerCloser.Close()
@@ -313,7 +359,7 @@ func NewWithAPI(t *testing.T, options *Options) (*codersdk.Client, io.Closer, *c
 // well with coderd testing. It registers the "echo" provisioner for
 // quick testing.
 func NewProvisionerDaemon(t *testing.T, coderAPI *coderd.API) io.Closer {
-	echoClient, echoServer := provisionersdk.TransportPipe()
+	echoClient, echoServer := provisionersdk.MemTransportPipe()
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		_ = echoClient.Close()
@@ -328,16 +374,54 @@ func NewProvisionerDaemon(t *testing.T, coderAPI *coderd.API) io.Closer {
 		assert.NoError(t, err)
 	}()
 
-	closer := provisionerd.New(func(ctx context.Context) (proto.DRPCProvisionerDaemonClient, error) {
-		return coderAPI.ListenProvisionerDaemon(ctx, 0)
+	closer := provisionerd.New(func(ctx context.Context) (provisionerdproto.DRPCProvisionerDaemonClient, error) {
+		return coderAPI.CreateInMemoryProvisionerDaemon(ctx, 0)
 	}, &provisionerd.Options{
 		Filesystem:          fs,
 		Logger:              slogtest.Make(t, nil).Named("provisionerd").Leveled(slog.LevelDebug),
-		PollInterval:        50 * time.Millisecond,
+		JobPollInterval:     50 * time.Millisecond,
 		UpdateInterval:      250 * time.Millisecond,
 		ForceCancelInterval: time.Second,
 		Provisioners: provisionerd.Provisioners{
-			string(database.ProvisionerTypeEcho): sdkproto.NewDRPCProvisionerClient(provisionersdk.Conn(echoClient)),
+			string(database.ProvisionerTypeEcho): sdkproto.NewDRPCProvisionerClient(echoClient),
+		},
+		WorkDirectory: t.TempDir(),
+	})
+	t.Cleanup(func() {
+		_ = closer.Close()
+	})
+	return closer
+}
+
+func NewExternalProvisionerDaemon(t *testing.T, client *codersdk.Client, org uuid.UUID, tags map[string]string) io.Closer {
+	echoClient, echoServer := provisionersdk.MemTransportPipe()
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	serveDone := make(chan struct{})
+	t.Cleanup(func() {
+		_ = echoClient.Close()
+		_ = echoServer.Close()
+		cancelFunc()
+		<-serveDone
+	})
+	fs := afero.NewMemMapFs()
+	go func() {
+		defer close(serveDone)
+		err := echo.Serve(ctx, fs, &provisionersdk.ServeOptions{
+			Listener: echoServer,
+		})
+		assert.NoError(t, err)
+	}()
+
+	closer := provisionerd.New(func(ctx context.Context) (provisionerdproto.DRPCProvisionerDaemonClient, error) {
+		return client.ServeProvisionerDaemon(ctx, org, []codersdk.ProvisionerType{codersdk.ProvisionerTypeEcho}, tags)
+	}, &provisionerd.Options{
+		Filesystem:          fs,
+		Logger:              slogtest.Make(t, nil).Named("provisionerd").Leveled(slog.LevelDebug),
+		JobPollInterval:     50 * time.Millisecond,
+		UpdateInterval:      250 * time.Millisecond,
+		ForceCancelInterval: time.Second,
+		Provisioners: provisionerd.Provisioners{
+			string(database.ProvisionerTypeEcho): sdkproto.NewDRPCProvisionerClient(echoClient),
 		},
 		WorkDirectory: t.TempDir(),
 	})
@@ -348,10 +432,9 @@ func NewProvisionerDaemon(t *testing.T, coderAPI *coderd.API) io.Closer {
 }
 
 var FirstUserParams = codersdk.CreateFirstUserRequest{
-	Email:            "testuser@coder.com",
-	Username:         "testuser",
-	Password:         "testpass",
-	OrganizationName: "testorg",
+	Email:    "testuser@coder.com",
+	Username: "testuser",
+	Password: "SomeSecurePassword!",
 }
 
 // CreateFirstUser creates a user with preset credentials and authenticates
@@ -370,12 +453,7 @@ func CreateFirstUser(t *testing.T, client *codersdk.Client) codersdk.CreateFirst
 }
 
 // CreateAnotherUser creates and authenticates a new user.
-func CreateAnotherUser(t *testing.T, client *codersdk.Client, organizationID uuid.UUID, roles ...string) *codersdk.Client {
-	userClient, _ := createAnotherUserRetry(t, client, organizationID, 5, roles...)
-	return userClient
-}
-
-func CreateAnotherUserWithUser(t *testing.T, client *codersdk.Client, organizationID uuid.UUID, roles ...string) (*codersdk.Client, codersdk.User) {
+func CreateAnotherUser(t *testing.T, client *codersdk.Client, organizationID uuid.UUID, roles ...string) (*codersdk.Client, codersdk.User) {
 	return createAnotherUserRetry(t, client, organizationID, 5, roles...)
 }
 
@@ -383,7 +461,7 @@ func createAnotherUserRetry(t *testing.T, client *codersdk.Client, organizationI
 	req := codersdk.CreateUserRequest{
 		Email:          namesgenerator.GetRandomName(10) + "@coder.com",
 		Username:       randomUsername(),
-		Password:       "testpass",
+		Password:       "SomeSecurePassword!",
 		OrganizationID: organizationID,
 	}
 
@@ -444,17 +522,23 @@ func createAnotherUserRetry(t *testing.T, client *codersdk.Client, organizationI
 // CreateTemplateVersion creates a template import provisioner job
 // with the responses provided. It uses the "echo" provisioner for compatibility
 // with testing.
-func CreateTemplateVersion(t *testing.T, client *codersdk.Client, organizationID uuid.UUID, res *echo.Responses) codersdk.TemplateVersion {
+func CreateTemplateVersion(t *testing.T, client *codersdk.Client, organizationID uuid.UUID, res *echo.Responses, mutators ...func(*codersdk.CreateTemplateVersionRequest)) codersdk.TemplateVersion {
 	t.Helper()
 	data, err := echo.Tar(res)
 	require.NoError(t, err)
-	file, err := client.Upload(context.Background(), codersdk.ContentTypeTar, data)
+	file, err := client.Upload(context.Background(), codersdk.ContentTypeTar, bytes.NewReader(data))
 	require.NoError(t, err)
-	templateVersion, err := client.CreateTemplateVersion(context.Background(), organizationID, codersdk.CreateTemplateVersionRequest{
+
+	req := codersdk.CreateTemplateVersionRequest{
 		FileID:        file.ID,
 		StorageMethod: codersdk.ProvisionerStorageMethodFile,
 		Provisioner:   codersdk.ProvisionerTypeEcho,
-	})
+	}
+	for _, mut := range mutators {
+		mut(&req)
+	}
+
+	templateVersion, err := client.CreateTemplateVersion(context.Background(), organizationID, req)
 	require.NoError(t, err)
 	return templateVersion
 }
@@ -495,7 +579,7 @@ func CreateTemplate(t *testing.T, client *codersdk.Client, organization uuid.UUI
 func UpdateTemplateVersion(t *testing.T, client *codersdk.Client, organizationID uuid.UUID, res *echo.Responses, templateID uuid.UUID) codersdk.TemplateVersion {
 	data, err := echo.Tar(res)
 	require.NoError(t, err)
-	file, err := client.Upload(context.Background(), codersdk.ContentTypeTar, data)
+	file, err := client.Upload(context.Background(), codersdk.ContentTypeTar, bytes.NewReader(data))
 	require.NoError(t, err)
 	templateVersion, err := client.CreateTemplateVersion(context.Background(), organizationID, codersdk.CreateTemplateVersionRequest{
 		TemplateID:    templateID,
@@ -511,13 +595,17 @@ func UpdateTemplateVersion(t *testing.T, client *codersdk.Client, organizationID
 func AwaitTemplateVersionJob(t *testing.T, client *codersdk.Client, version uuid.UUID) codersdk.TemplateVersion {
 	t.Helper()
 
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitMedium)
+	defer cancel()
+
 	t.Logf("waiting for template version job %s", version)
 	var templateVersion codersdk.TemplateVersion
 	require.Eventually(t, func() bool {
 		var err error
-		templateVersion, err = client.TemplateVersion(context.Background(), version)
+		templateVersion, err = client.TemplateVersion(ctx, version)
 		return assert.NoError(t, err) && templateVersion.Job.CompletedAt != nil
 	}, testutil.WaitMedium, testutil.IntervalFast)
+	t.Logf("got template version job %s", version)
 	return templateVersion
 }
 
@@ -525,12 +613,17 @@ func AwaitTemplateVersionJob(t *testing.T, client *codersdk.Client, version uuid
 func AwaitWorkspaceBuildJob(t *testing.T, client *codersdk.Client, build uuid.UUID) codersdk.WorkspaceBuild {
 	t.Helper()
 
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitShort)
+	defer cancel()
+
 	t.Logf("waiting for workspace build job %s", build)
 	var workspaceBuild codersdk.WorkspaceBuild
 	require.Eventually(t, func() bool {
-		workspaceBuild, err := client.WorkspaceBuild(context.Background(), build)
+		var err error
+		workspaceBuild, err = client.WorkspaceBuild(ctx, build)
 		return assert.NoError(t, err) && workspaceBuild.Job.CompletedAt != nil
 	}, testutil.WaitShort, testutil.IntervalFast)
+	t.Logf("got workspace build job %s", build)
 	return workspaceBuild
 }
 
@@ -538,11 +631,14 @@ func AwaitWorkspaceBuildJob(t *testing.T, client *codersdk.Client, build uuid.UU
 func AwaitWorkspaceAgents(t *testing.T, client *codersdk.Client, workspaceID uuid.UUID) []codersdk.WorkspaceResource {
 	t.Helper()
 
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+	defer cancel()
+
 	t.Logf("waiting for workspace agents (workspace %s)", workspaceID)
 	var resources []codersdk.WorkspaceResource
 	require.Eventually(t, func() bool {
 		var err error
-		workspace, err := client.Workspace(context.Background(), workspaceID)
+		workspace, err := client.Workspace(ctx, workspaceID)
 		if !assert.NoError(t, err) {
 			return false
 		}
@@ -562,6 +658,7 @@ func AwaitWorkspaceAgents(t *testing.T, client *codersdk.Client, workspaceID uui
 
 		return true
 	}, testutil.WaitLong, testutil.IntervalFast)
+	t.Logf("got workspace agents (workspace %s)", workspaceID)
 	return resources
 }
 
@@ -806,7 +903,23 @@ func (o *OIDCConfig) EncodeClaims(t *testing.T, claims jwt.MapClaims) string {
 	return base64.StdEncoding.EncodeToString([]byte(signed))
 }
 
-func (o *OIDCConfig) OIDCConfig() *coderd.OIDCConfig {
+func (o *OIDCConfig) OIDCConfig(t *testing.T, userInfoClaims jwt.MapClaims) *coderd.OIDCConfig {
+	// By default, the provider can be empty.
+	// This means it won't support any endpoints!
+	provider := &oidc.Provider{}
+	if userInfoClaims != nil {
+		resp, err := json.Marshal(userInfoClaims)
+		require.NoError(t, err)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(resp)
+		}))
+		t.Cleanup(srv.Close)
+		cfg := &oidc.ProviderConfig{
+			UserInfoURL: srv.URL,
+		}
+		provider = cfg.NewProvider(context.Background())
+	}
 	return &coderd.OIDCConfig{
 		OAuth2Config: o,
 		Verifier: oidc.NewVerifier(o.issuer, &oidc.StaticKeySet{
@@ -814,6 +927,8 @@ func (o *OIDCConfig) OIDCConfig() *coderd.OIDCConfig {
 		}, &oidc.Config{
 			SkipClientIDCheck: true,
 		}),
+		Provider:      provider,
+		UsernameField: "preferred_username",
 	}
 }
 
@@ -844,7 +959,7 @@ func NewAzureInstanceIdentity(t *testing.T, instanceID string) (x509.VerifyOptio
 	signature := make([]byte, base64.StdEncoding.EncodedLen(len(signatureRaw)))
 	base64.StdEncoding.Encode(signature, signatureRaw)
 
-	payload, err := json.Marshal(codersdk.AzureInstanceIdentityToken{
+	payload, err := json.Marshal(agentsdk.AzureInstanceIdentityToken{
 		Signature: string(signature),
 		Encoding:  "pkcs7",
 	})

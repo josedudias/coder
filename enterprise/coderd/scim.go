@@ -14,6 +14,7 @@ import (
 
 	agpl "github.com/coder/coder/coderd"
 	"github.com/coder/coder/coderd/database"
+	"github.com/coder/coder/coderd/database/dbauthz"
 	"github.com/coder/coder/coderd/httpapi"
 	"github.com/coder/coder/codersdk"
 )
@@ -43,6 +44,14 @@ func (api *API) scimVerifyAuthHeader(r *http.Request) bool {
 // Okta to try and create each user individually, this way we don't need to
 // implement fetching users twice.
 //
+// @Summary SCIM 2.0: Get users
+// @ID scim-get-users
+// @Security CoderSessionToken
+// @Produce application/scim+json
+// @Tags Enterprise
+// @Success 200
+// @Router /scim/v2/Users [get]
+//
 //nolint:revive
 func (api *API) scimGetUsers(rw http.ResponseWriter, r *http.Request) {
 	if !api.scimVerifyAuthHeader(r) {
@@ -61,6 +70,19 @@ func (api *API) scimGetUsers(rw http.ResponseWriter, r *http.Request) {
 // scimGetUser intentionally always returns an error saying the user wasn't found.
 // This is done to always force Okta to try and create the user, this way we
 // don't need to implement fetching users twice.
+//
+// scimGetUsers intentionally always returns no users. This is done to always force
+// Okta to try and create each user individually, this way we don't need to
+// implement fetching users twice.
+//
+// @Summary SCIM 2.0: Get user by ID
+// @ID scim-get-user-by-id
+// @Security CoderSessionToken
+// @Produce application/scim+json
+// @Tags Enterprise
+// @Param id path string true "User ID" format(uuid)
+// @Failure 404
+// @Router /scim/v2/Users/{id} [get]
 //
 //nolint:revive
 func (api *API) scimGetUser(rw http.ResponseWriter, r *http.Request) {
@@ -86,7 +108,7 @@ type SCIMUser struct {
 	} `json:"name"`
 	Emails []struct {
 		Primary bool   `json:"primary"`
-		Value   string `json:"value"`
+		Value   string `json:"value" format:"email"`
 		Type    string `json:"type"`
 		Display string `json:"display"`
 	} `json:"emails"`
@@ -98,6 +120,15 @@ type SCIMUser struct {
 }
 
 // scimPostUser creates a new user, or returns the existing user if it exists.
+//
+// @Summary SCIM 2.0: Create new user
+// @ID scim-create-new-user
+// @Security CoderSessionToken
+// @Produce json
+// @Tags Enterprise
+// @Param request body coderd.SCIMUser true "New user"
+// @Success 200 {object} coderd.SCIMUser
+// @Router /scim/v2/Users [post]
 func (api *API) scimPostUser(rw http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if !api.scimVerifyAuthHeader(r) {
@@ -125,7 +156,8 @@ func (api *API) scimPostUser(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, _, err := api.AGPL.CreateUser(ctx, api.Database, agpl.CreateUserRequest{
+	//nolint:gocritic // needed for SCIM
+	user, _, err := api.AGPL.CreateUser(dbauthz.AsSystemRestricted(ctx), api.Database, agpl.CreateUserRequest{
 		CreateUserRequest: codersdk.CreateUserRequest{
 			Username: sUser.UserName,
 			Email:    email,
@@ -144,6 +176,16 @@ func (api *API) scimPostUser(rw http.ResponseWriter, r *http.Request) {
 }
 
 // scimPatchUser supports suspending and activating users only.
+//
+// @Summary SCIM 2.0: Update user account
+// @ID scim-update-user-status
+// @Security CoderSessionToken
+// @Produce application/scim+json
+// @Tags Enterprise
+// @Param id path string true "User ID" format(uuid)
+// @Param request body coderd.SCIMUser true "Update user request"
+// @Success 200 {object} codersdk.User
+// @Router /scim/v2/Users/{id} [patch]
 func (api *API) scimPatchUser(rw http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if !api.scimVerifyAuthHeader(r) {
@@ -167,7 +209,8 @@ func (api *API) scimPatchUser(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dbUser, err := api.Database.GetUserByID(ctx, uid)
+	//nolint:gocritic // needed for SCIM
+	dbUser, err := api.Database.GetUserByID(dbauthz.AsSystemRestricted(ctx), uid)
 	if err != nil {
 		_ = handlerutil.WriteError(rw, err)
 		return
@@ -180,7 +223,8 @@ func (api *API) scimPatchUser(rw http.ResponseWriter, r *http.Request) {
 		status = database.UserStatusSuspended
 	}
 
-	_, err = api.Database.UpdateUserStatus(r.Context(), database.UpdateUserStatusParams{
+	//nolint:gocritic // needed for SCIM
+	_, err = api.Database.UpdateUserStatus(dbauthz.AsSystemRestricted(r.Context()), database.UpdateUserStatusParams{
 		ID:        dbUser.ID,
 		Status:    status,
 		UpdatedAt: database.Now(),

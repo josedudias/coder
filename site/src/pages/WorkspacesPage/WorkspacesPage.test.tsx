@@ -1,7 +1,10 @@
 import { screen, waitFor } from "@testing-library/react"
 import { rest } from "msw"
 import * as CreateDayString from "util/createDayString"
-import { MockWorkspace } from "../../testHelpers/entities"
+import {
+  MockWorkspace,
+  MockWorkspacesResponse,
+} from "../../testHelpers/entities"
 import { history, render } from "../../testHelpers/renderHelpers"
 import { server } from "../../testHelpers/server"
 import WorkspacesPage from "./WorkspacesPage"
@@ -46,7 +49,7 @@ describe("WorkspacesPage", () => {
           name: "Previous page",
         })
         expect(prevPage).toBeDisabled()
-        const pageButtons = await container.querySelectorAll(
+        const pageButtons = container.querySelectorAll(
           `button[name="Page button"]`,
         )
         expect(pageButtons.length).toBe(2)
@@ -54,5 +57,9 @@ describe("WorkspacesPage", () => {
       { timeout: 2000 },
     )
     await screen.findByText(`${MockWorkspace.name}1`)
+    const templateDisplayNames = await screen.findAllByText(
+      `${MockWorkspace.template_display_name}`,
+    )
+    expect(templateDisplayNames).toHaveLength(MockWorkspacesResponse.count)
   })
 })

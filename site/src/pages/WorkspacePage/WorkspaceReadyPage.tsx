@@ -1,15 +1,18 @@
-import { useActor, useSelector } from "@xstate/react"
-import { FeatureNames } from "api/types"
+import { useActor } from "@xstate/react"
+import { useDashboard } from "components/Dashboard/DashboardProvider"
 import dayjs from "dayjs"
-import { useContext } from "react"
+import { useFeatureVisibility } from "hooks/useFeatureVisibility"
+import { useEffect } from "react"
 import { Helmet } from "react-helmet-async"
 import { useTranslation } from "react-i18next"
+import { useNavigate } from "react-router-dom"
 import {
+  getDeadline,
   getMaxDeadline,
   getMaxDeadlineChange,
   getMinDeadline,
 } from "util/schedule"
-import { selectFeatureVisibility } from "xServices/entitlements/entitlementsSelectors"
+import { quotaMachine } from "xServices/quotas/quotasXService"
 import { StateFrom } from "xstate"
 import { DeleteDialog } from "../../components/Dialogs/DeleteDialog/DeleteDialog"
 import {
@@ -18,7 +21,6 @@ import {
 } from "../../components/Workspace/Workspace"
 import { pageTitle } from "../../util/page"
 import { getFaviconByStatus } from "../../util/workspace"
-import { XServiceContext } from "../../xServices/StateContext"
 import {
   WorkspaceEvent,
   workspaceMachine,
@@ -26,26 +28,24 @@ import {
 
 interface WorkspaceReadyPageProps {
   workspaceState: StateFrom<typeof workspaceMachine>
+  quotaState: StateFrom<typeof quotaMachine>
   workspaceSend: (event: WorkspaceEvent) => void
 }
 
 export const WorkspaceReadyPage = ({
   workspaceState,
+  quotaState,
   workspaceSend,
 }: WorkspaceReadyPageProps): JSX.Element => {
-  const [bannerState, bannerSend] = useActor(
+  const [_, bannerSend] = useActor(
     workspaceState.children["scheduleBannerMachine"],
   )
-  const deadline = bannerState.context.deadline
-  const xServices = useContext(XServiceContext)
-  const featureVisibility = useSelector(
-    xServices.entitlementsXService,
-    selectFeatureVisibility,
-  )
-  const [buildInfoState] = useActor(xServices.buildInfoXService)
+  const { buildInfo } = useDashboard()
+  const featureVisibility = useFeatureVisibility()
   const {
     workspace,
     template,
+    templateParameters,
     refreshWorkspaceWarning,
     builds,
     getBuildsError,
@@ -57,9 +57,16 @@ export const WorkspaceReadyPage = ({
   if (workspace === undefined) {
     throw Error("Workspace is undefined")
   }
+  const deadline = getDeadline(workspace)
   const canUpdateWorkspace = Boolean(permissions?.updateWorkspace)
   const { t } = useTranslation("workspacePage")
   const favicon = getFaviconByStatus(workspace.latest_build)
+  const navigate = useNavigate()
+
+  // keep banner machine in sync with workspace
+  useEffect(() => {
+    bannerSend({ type: "REFRESH_WORKSPACE", workspace })
+  }, [bannerSend, workspace])
 
   return (
     <>
@@ -91,18 +98,11 @@ export const WorkspaceReadyPage = ({
               hours,
             })
           },
-          deadlineMinusEnabled: () => !bannerState.matches("atMinDeadline"),
-          deadlinePlusEnabled: () => !bannerState.matches("atMaxDeadline"),
-          maxDeadlineDecrease: deadline
-            ? getMaxDeadlineChange(deadline, getMinDeadline())
-            : 0,
-          maxDeadlineIncrease:
-            deadline && template
-              ? getMaxDeadlineChange(
-                  getMaxDeadline(workspace, template),
-                  deadline,
-                )
-              : 0,
+          maxDeadlineDecrease: getMaxDeadlineChange(deadline, getMinDeadline()),
+          maxDeadlineIncrease: getMaxDeadlineChange(
+            getMaxDeadline(workspace),
+            deadline,
+          ),
         }}
         isUpdating={workspaceState.hasTag("updating")}
         workspace={workspace}
@@ -111,19 +111,24 @@ export const WorkspaceReadyPage = ({
         handleDelete={() => workspaceSend({ type: "ASK_DELETE" })}
         handleUpdate={() => workspaceSend({ type: "UPDATE" })}
         handleCancel={() => workspaceSend({ type: "CANCEL" })}
+        handleChangeVersion={() => navigate("change-version")}
+        handleBuildParameters={() => navigate("build-parameters")}
         resources={workspace.latest_build.resources}
         builds={builds}
         canUpdateWorkspace={canUpdateWorkspace}
-        hideSSHButton={featureVisibility[FeatureNames.BrowserOnly]}
+        hideSSHButton={featureVisibility["browser_only"]}
+        hideVSCodeDesktopButton={featureVisibility["browser_only"]}
         workspaceErrors={{
           [WorkspaceErrors.GET_RESOURCES_ERROR]: refreshWorkspaceWarning,
           [WorkspaceErrors.GET_BUILDS_ERROR]: getBuildsError,
           [WorkspaceErrors.BUILD_ERROR]: buildError,
           [WorkspaceErrors.CANCELLATION_ERROR]: cancellationError,
         }}
-        buildInfo={buildInfoState.context.buildInfo}
+        buildInfo={buildInfo}
         applicationsHost={applicationsHost}
         template={template}
+        templateParameters={templateParameters}
+        quota_budget={quotaState.context.quota?.budget}
       />
       <DeleteDialog
         entity="workspace"

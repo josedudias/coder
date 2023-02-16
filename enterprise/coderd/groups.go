@@ -17,12 +17,22 @@ import (
 	"github.com/coder/coder/codersdk"
 )
 
+// @Summary Create group for organization
+// @ID create-group-for-organization
+// @Security CoderSessionToken
+// @Accept json
+// @Produce json
+// @Tags Templates
+// @Param request body codersdk.CreateGroupRequest true "Create group request"
+// @Param organization path string true "Organization ID"
+// @Success 201 {object} codersdk.Group
+// @Router /organizations/{organization}/groups [post]
 func (api *API) postGroupByOrganization(rw http.ResponseWriter, r *http.Request) {
 	var (
 		ctx               = r.Context()
 		org               = httpmw.OrganizationParam(r)
 		auditor           = api.AGPL.Auditor.Load()
-		aReq, commitAudit = audit.InitRequest[database.Group](rw, &audit.RequestParams{
+		aReq, commitAudit = audit.InitRequest[database.AuditableGroup](rw, &audit.RequestParams{
 			Audit:   *auditor,
 			Log:     api.Logger,
 			Request: r,
@@ -31,7 +41,7 @@ func (api *API) postGroupByOrganization(rw http.ResponseWriter, r *http.Request)
 	)
 	defer commitAudit()
 
-	if !api.Authorize(r, rbac.ActionCreate, rbac.ResourceGroup) {
+	if !api.Authorize(r, rbac.ActionCreate, rbac.ResourceGroup.InOrg(org.ID)) {
 		http.NotFound(rw, r)
 		return
 	}
@@ -53,6 +63,7 @@ func (api *API) postGroupByOrganization(rw http.ResponseWriter, r *http.Request)
 		Name:           req.Name,
 		OrganizationID: org.ID,
 		AvatarURL:      req.AvatarURL,
+		QuotaAllowance: int32(req.QuotaAllowance),
 	})
 	if database.IsUniqueViolation(err) {
 		httpapi.Write(ctx, rw, http.StatusConflict, codersdk.Response{
@@ -64,17 +75,27 @@ func (api *API) postGroupByOrganization(rw http.ResponseWriter, r *http.Request)
 		httpapi.InternalServerError(rw, err)
 		return
 	}
-	aReq.New = group
+
+	var emptyUsers []database.User
+	aReq.New = group.Auditable(emptyUsers)
 
 	httpapi.Write(ctx, rw, http.StatusCreated, convertGroup(group, nil))
 }
 
+// @Summary Update group by name
+// @ID update-group-by-name
+// @Security CoderSessionToken
+// @Produce json
+// @Tags Enterprise
+// @Param group path string true "Group name"
+// @Success 200 {object} codersdk.Group
+// @Router /groups/{group} [patch]
 func (api *API) patchGroup(rw http.ResponseWriter, r *http.Request) {
 	var (
 		ctx               = r.Context()
 		group             = httpmw.GroupParam(r)
 		auditor           = api.AGPL.Auditor.Load()
-		aReq, commitAudit = audit.InitRequest[database.Group](rw, &audit.RequestParams{
+		aReq, commitAudit = audit.InitRequest[database.AuditableGroup](rw, &audit.RequestParams{
 			Audit:   *auditor,
 			Log:     api.Logger,
 			Request: r,
@@ -82,7 +103,14 @@ func (api *API) patchGroup(rw http.ResponseWriter, r *http.Request) {
 		})
 	)
 	defer commitAudit()
-	aReq.Old = group
+
+	currentMembers, currentMembersErr := api.Database.GetGroupMembers(ctx, group.ID)
+	if currentMembersErr != nil {
+		httpapi.InternalServerError(rw, currentMembersErr)
+		return
+	}
+
+	aReq.Old = group.Auditable(currentMembers)
 
 	if !api.Authorize(r, rbac.ActionUpdate, group) {
 		http.NotFound(rw, r)
@@ -125,7 +153,7 @@ func (api *API) patchGroup(rw http.ResponseWriter, r *http.Request) {
 			UserID:         uuid.MustParse(id),
 		})
 		if xerrors.Is(err, sql.ErrNoRows) {
-			httpapi.Write(ctx, rw, http.StatusPreconditionFailed, codersdk.Response{
+			httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
 				Message: fmt.Sprintf("User %q must be a member of organization %q", id, group.ID),
 			})
 			return
@@ -155,49 +183,66 @@ func (api *API) patchGroup(rw http.ResponseWriter, r *http.Request) {
 			return xerrors.Errorf("get group by ID: %w", err)
 		}
 
-		// TODO: Do we care about validating this?
-		if req.AvatarURL != nil {
-			group.AvatarURL = *req.AvatarURL
-		}
-		if req.Name != "" {
-			group.Name = req.Name
+		updateGroupParams := database.UpdateGroupByIDParams{
+			ID:             group.ID,
+			AvatarURL:      group.AvatarURL,
+			Name:           group.Name,
+			QuotaAllowance: group.QuotaAllowance,
 		}
 
-		group, err = tx.UpdateGroupByID(ctx, database.UpdateGroupByIDParams{
-			ID:        group.ID,
-			Name:      group.Name,
-			AvatarURL: group.AvatarURL,
-		})
+		// TODO: Do we care about validating this?
+		if req.AvatarURL != nil {
+			updateGroupParams.AvatarURL = *req.AvatarURL
+		}
+		if req.Name != "" {
+			updateGroupParams.Name = req.Name
+		}
+		if req.QuotaAllowance != nil {
+			updateGroupParams.QuotaAllowance = int32(*req.QuotaAllowance)
+		}
+
+		group, err = tx.UpdateGroupByID(ctx, updateGroupParams)
 		if err != nil {
 			return xerrors.Errorf("update group by ID: %w", err)
 		}
 
 		for _, id := range req.AddUsers {
-			err := tx.InsertGroupMember(ctx, database.InsertGroupMemberParams{
+			userID, err := uuid.Parse(id)
+			if err != nil {
+				return xerrors.Errorf("parse user ID %q: %w", id, err)
+			}
+			err = tx.InsertGroupMember(ctx, database.InsertGroupMemberParams{
 				GroupID: group.ID,
-				UserID:  uuid.MustParse(id),
+				UserID:  userID,
 			})
 			if err != nil {
 				return xerrors.Errorf("insert group member %q: %w", id, err)
 			}
 		}
 		for _, id := range req.RemoveUsers {
-			err := tx.DeleteGroupMember(ctx, uuid.MustParse(id))
+			userID, err := uuid.Parse(id)
+			if err != nil {
+				return xerrors.Errorf("parse user ID %q: %w", id, err)
+			}
+			err = tx.DeleteGroupMemberFromGroup(ctx, database.DeleteGroupMemberFromGroupParams{
+				UserID:  userID,
+				GroupID: group.ID,
+			})
 			if err != nil {
 				return xerrors.Errorf("insert group member %q: %w", id, err)
 			}
 		}
 		return nil
-	})
+	}, nil)
 	if database.IsUniqueViolation(err) {
-		httpapi.Write(ctx, rw, http.StatusPreconditionFailed, codersdk.Response{
+		httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
 			Message: "Cannot add the same user to a group twice!",
 			Detail:  err.Error(),
 		})
 		return
 	}
 	if xerrors.Is(err, sql.ErrNoRows) {
-		httpapi.Write(ctx, rw, http.StatusPreconditionFailed, codersdk.Response{
+		httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
 			Message: "Failed to add or remove non-existent group member",
 			Detail:  err.Error(),
 		})
@@ -208,23 +253,31 @@ func (api *API) patchGroup(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	members, err := api.Database.GetGroupMembers(ctx, group.ID)
+	patchedMembers, err := api.Database.GetGroupMembers(ctx, group.ID)
 	if err != nil {
 		httpapi.InternalServerError(rw, err)
 		return
 	}
 
-	aReq.New = group
+	aReq.New = group.Auditable(patchedMembers)
 
-	httpapi.Write(ctx, rw, http.StatusOK, convertGroup(group, members))
+	httpapi.Write(ctx, rw, http.StatusOK, convertGroup(group, patchedMembers))
 }
 
+// @Summary Delete group by name
+// @ID delete-group-by-name
+// @Security CoderSessionToken
+// @Produce json
+// @Tags Enterprise
+// @Param group path string true "Group name"
+// @Success 200 {object} codersdk.Group
+// @Router /groups/{group} [delete]
 func (api *API) deleteGroup(rw http.ResponseWriter, r *http.Request) {
 	var (
 		ctx               = r.Context()
 		group             = httpmw.GroupParam(r)
 		auditor           = api.AGPL.Auditor.Load()
-		aReq, commitAudit = audit.InitRequest[database.Group](rw, &audit.RequestParams{
+		aReq, commitAudit = audit.InitRequest[database.AuditableGroup](rw, &audit.RequestParams{
 			Audit:   *auditor,
 			Log:     api.Logger,
 			Request: r,
@@ -232,7 +285,14 @@ func (api *API) deleteGroup(rw http.ResponseWriter, r *http.Request) {
 		})
 	)
 	defer commitAudit()
-	aReq.Old = group
+
+	groupMembers, getMembersErr := api.Database.GetGroupMembers(ctx, group.ID)
+	if getMembersErr != nil {
+		httpapi.InternalServerError(rw, getMembersErr)
+		return
+	}
+
+	aReq.Old = group.Auditable(groupMembers)
 
 	if !api.Authorize(r, rbac.ActionDelete, group) {
 		httpapi.ResourceNotFound(rw)
@@ -257,6 +317,27 @@ func (api *API) deleteGroup(rw http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// @Summary Get group by organization and group name
+// @ID get-group-by-organization-and-group-name
+// @Security CoderSessionToken
+// @Produce json
+// @Tags Enterprise
+// @Param organization path string true "Organization ID" format(uuid)
+// @Param groupName path string true "Group name"
+// @Success 200 {object} codersdk.Group
+// @Router /organizations/{organization}/groups/{groupName} [get]
+func (api *API) groupByOrganization(rw http.ResponseWriter, r *http.Request) {
+	api.group(rw, r)
+}
+
+// @Summary Get group by name
+// @ID get-group-by-name
+// @Security CoderSessionToken
+// @Produce json
+// @Tags Enterprise
+// @Param group path string true "Group name"
+// @Success 200 {object} codersdk.Group
+// @Router /groups/{group} [get]
 func (api *API) group(rw http.ResponseWriter, r *http.Request) {
 	var (
 		ctx   = r.Context()
@@ -277,6 +358,26 @@ func (api *API) group(rw http.ResponseWriter, r *http.Request) {
 	httpapi.Write(ctx, rw, http.StatusOK, convertGroup(group, users))
 }
 
+// @Summary Get groups by organization
+// @ID get-groups-by-organization
+// @Security CoderSessionToken
+// @Produce json
+// @Tags Enterprise
+// @Param organization path string true "Organization ID" format(uuid)
+// @Success 200 {array} codersdk.Group
+// @Router /organizations/{organization}/groups [get]
+func (api *API) groupsByOrganization(rw http.ResponseWriter, r *http.Request) {
+	api.groups(rw, r)
+}
+
+// @Summary Get groups
+// @ID get-groups
+// @Security CoderSessionToken
+// @Produce json
+// @Tags Enterprise
+// @Param organization path string true "Organization ID" format(uuid)
+// @Success 200 {array} codersdk.Group
+// @Router /groups [get]
 func (api *API) groups(rw http.ResponseWriter, r *http.Request) {
 	var (
 		ctx = r.Context()
@@ -327,6 +428,7 @@ func convertGroup(g database.Group, users []database.User) codersdk.Group {
 		Name:           g.Name,
 		OrganizationID: g.OrganizationID,
 		AvatarURL:      g.AvatarURL,
+		QuotaAllowance: int(g.QuotaAllowance),
 		Members:        convertUsers(users, orgs),
 	}
 }

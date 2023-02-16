@@ -1,47 +1,61 @@
-import { getDeploymentConfig } from "api/api"
-import { DeploymentConfig } from "api/typesGenerated"
+import { getDeploymentConfig, getDeploymentDAUs } from "api/api"
+import { DeploymentConfig, DeploymentDAUsResponse } from "api/typesGenerated"
 import { createMachine, assign } from "xstate"
 
 export const deploymentConfigMachine = createMachine(
   {
     id: "deploymentConfigMachine",
     predictableActionArguments: true,
-    initial: "idle",
+
     schema: {
       context: {} as {
         deploymentConfig?: DeploymentConfig
         getDeploymentConfigError?: unknown
+        deploymentDAUs?: DeploymentDAUsResponse
+        getDeploymentDAUsError?: unknown
       },
       events: {} as { type: "LOAD" },
       services: {} as {
         getDeploymentConfig: {
           data: DeploymentConfig
         }
+        getDeploymentDAUs: {
+          data: DeploymentDAUsResponse
+        }
       },
     },
     tsTypes: {} as import("./deploymentConfigMachine.typegen").Typegen0,
+    initial: "config",
     states: {
-      idle: {
-        on: {
-          LOAD: {
-            target: "loading",
-          },
-        },
-      },
-      loading: {
+      config: {
         invoke: {
           src: "getDeploymentConfig",
           onDone: {
-            target: "loaded",
+            target: "daus",
             actions: ["assignDeploymentConfig"],
           },
           onError: {
-            target: "idle",
+            target: "daus",
             actions: ["assignGetDeploymentConfigError"],
           },
         },
+        tags: "loading",
       },
-      loaded: {
+      daus: {
+        invoke: {
+          src: "getDeploymentDAUs",
+          onDone: {
+            target: "done",
+            actions: ["assignDeploymentDAUs"],
+          },
+          onError: {
+            target: "done",
+            actions: ["assignGetDeploymentDAUsError"],
+          },
+        },
+        tags: "loading",
+      },
+      done: {
         type: "final",
       },
     },
@@ -49,6 +63,7 @@ export const deploymentConfigMachine = createMachine(
   {
     services: {
       getDeploymentConfig: getDeploymentConfig,
+      getDeploymentDAUs: getDeploymentDAUs,
     },
     actions: {
       assignDeploymentConfig: assign({
@@ -56,6 +71,12 @@ export const deploymentConfigMachine = createMachine(
       }),
       assignGetDeploymentConfigError: assign({
         getDeploymentConfigError: (_, { data }) => data,
+      }),
+      assignDeploymentDAUs: assign({
+        deploymentDAUs: (_, { data }) => data,
+      }),
+      assignGetDeploymentDAUsError: assign({
+        getDeploymentDAUsError: (_, { data }) => data,
       }),
     },
   },

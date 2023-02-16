@@ -16,7 +16,7 @@ import (
 
 	"cdr.dev/slog/sloggers/slogtest"
 	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/coderd/database/databasefake"
+	"github.com/coder/coder/coderd/database/dbfake"
 	"github.com/coder/coder/coderd/database/dbtestutil"
 	"github.com/coder/coder/enterprise/replicasync"
 	"github.com/coder/coder/testutil"
@@ -187,7 +187,7 @@ func TestReplica(t *testing.T) {
 		// This doesn't use the database fake because creating
 		// this many PostgreSQL connections takes some
 		// configuration tweaking.
-		db := databasefake.New()
+		db := dbfake.New()
 		pubsub := database.NewPubsubInMemory()
 		logger := slogtest.Make(t, nil)
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -206,7 +206,12 @@ func TestReplica(t *testing.T) {
 				_ = server.Close()
 			})
 			done := false
+
+			var m sync.Mutex
 			server.SetCallback(func() {
+				m.Lock()
+				defer m.Unlock()
+
 				if len(server.All()) != count {
 					return
 				}

@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"sync"
 
 	"github.com/coder/coder/coderd/database"
 )
@@ -9,6 +10,13 @@ import (
 type Auditor interface {
 	Export(ctx context.Context, alog database.AuditLog) error
 	diff(old, new any) Map
+}
+
+type AdditionalFields struct {
+	WorkspaceName  string               `json:"workspace_name"`
+	BuildNumber    string               `json:"build_number"`
+	BuildReason    database.BuildReason `json:"build_reason"`
+	WorkspaceOwner string               `json:"workspace_owner"`
 }
 
 func NewNop() Auditor {
@@ -30,10 +38,13 @@ func NewMock() *MockAuditor {
 }
 
 type MockAuditor struct {
+	mutex     sync.Mutex
 	AuditLogs []database.AuditLog
 }
 
 func (a *MockAuditor) Export(_ context.Context, alog database.AuditLog) error {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
 	a.AuditLogs = append(a.AuditLogs, alog)
 	return nil
 }

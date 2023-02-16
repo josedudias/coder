@@ -2,19 +2,21 @@ import { makeStyles } from "@material-ui/core/styles"
 import { Margins } from "components/Margins/Margins"
 import { Stack } from "components/Stack/Stack"
 import { Sidebar } from "./Sidebar"
-import React, {
-  createContext,
-  PropsWithChildren,
-  Suspense,
-  useContext,
-  useEffect,
-} from "react"
-import { useActor } from "@xstate/react"
-import { XServiceContext } from "xServices/StateContext"
+import { createContext, Suspense, useContext, FC } from "react"
+import { useMachine } from "@xstate/react"
 import { Loader } from "components/Loader/Loader"
-import { DeploymentConfig } from "api/typesGenerated"
+import { DeploymentConfig, DeploymentDAUsResponse } from "api/typesGenerated"
+import { deploymentConfigMachine } from "xServices/deploymentConfig/deploymentConfigMachine"
+import { RequirePermission } from "components/RequirePermission/RequirePermission"
+import { usePermissions } from "hooks/usePermissions"
+import { Outlet } from "react-router-dom"
 
-type DeploySettingsContextValue = { deploymentConfig: DeploymentConfig }
+type DeploySettingsContextValue = {
+  deploymentConfig: DeploymentConfig
+  getDeploymentConfigError: unknown
+  deploymentDAUs?: DeploymentDAUsResponse
+  getDeploymentDAUsError: unknown
+}
 
 const DeploySettingsContext = createContext<
   DeploySettingsContextValue | undefined
@@ -30,37 +32,43 @@ export const useDeploySettings = (): DeploySettingsContextValue => {
   return context
 }
 
-export const DeploySettingsLayout: React.FC<PropsWithChildren> = ({
-  children,
-}) => {
-  const xServices = useContext(XServiceContext)
-  const [state, send] = useActor(xServices.deploymentConfigXService)
+export const DeploySettingsLayout: FC = () => {
+  const [state] = useMachine(deploymentConfigMachine)
   const styles = useStyles()
-  const { deploymentConfig } = state.context
-
-  useEffect(() => {
-    if (state.matches("idle")) {
-      send("LOAD")
-    }
-  }, [send, state])
+  const {
+    deploymentConfig,
+    deploymentDAUs,
+    getDeploymentConfigError,
+    getDeploymentDAUsError,
+  } = state.context
+  const permissions = usePermissions()
 
   return (
-    <Margins>
-      <Stack className={styles.wrapper} direction="row" spacing={5}>
-        <Sidebar />
-        <main className={styles.content}>
-          {deploymentConfig ? (
-            <DeploySettingsContext.Provider
-              value={{ deploymentConfig: deploymentConfig }}
-            >
-              <Suspense fallback={<Loader />}>{children}</Suspense>
-            </DeploySettingsContext.Provider>
-          ) : (
-            <Loader />
-          )}
-        </main>
-      </Stack>
-    </Margins>
+    <RequirePermission isFeatureVisible={permissions.viewDeploymentConfig}>
+      <Margins>
+        <Stack className={styles.wrapper} direction="row" spacing={6}>
+          <Sidebar />
+          <main className={styles.content}>
+            {deploymentConfig ? (
+              <DeploySettingsContext.Provider
+                value={{
+                  deploymentConfig,
+                  getDeploymentConfigError,
+                  deploymentDAUs,
+                  getDeploymentDAUsError,
+                }}
+              >
+                <Suspense fallback={<Loader />}>
+                  <Outlet />
+                </Suspense>
+              </DeploySettingsContext.Provider>
+            ) : (
+              <Loader />
+            )}
+          </main>
+        </Stack>
+      </Margins>
+    </RequirePermission>
   )
 }
 

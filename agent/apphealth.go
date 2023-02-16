@@ -11,6 +11,7 @@ import (
 
 	"cdr.dev/slog"
 	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/codersdk/agentsdk"
 	"github.com/coder/retry"
 )
 
@@ -18,7 +19,7 @@ import (
 type WorkspaceAgentApps func(context.Context) ([]codersdk.WorkspaceApp, error)
 
 // PostWorkspaceAgentAppHealth updates the workspace app health.
-type PostWorkspaceAgentAppHealth func(context.Context, codersdk.PostWorkspaceAppHealthsRequest) error
+type PostWorkspaceAgentAppHealth func(context.Context, agentsdk.PostAppHealthsRequest) error
 
 // WorkspaceAppHealthReporter is a function that checks and reports the health of the workspace apps until the passed context is canceled.
 type WorkspaceAppHealthReporter func(ctx context.Context)
@@ -34,10 +35,11 @@ func NewWorkspaceAppHealthReporter(logger slog.Logger, apps []codersdk.Workspace
 		hasHealthchecksEnabled := false
 		health := make(map[uuid.UUID]codersdk.WorkspaceAppHealth, 0)
 		for _, app := range apps {
-			health[app.ID] = app.Health
-			if !hasHealthchecksEnabled && app.Health != codersdk.WorkspaceAppHealthDisabled {
-				hasHealthchecksEnabled = true
+			if app.Health == codersdk.WorkspaceAppHealthDisabled {
+				continue
 			}
+			health[app.ID] = app.Health
+			hasHealthchecksEnabled = true
 		}
 
 		// no need to run this loop if no health checks are configured.
@@ -77,7 +79,7 @@ func NewWorkspaceAppHealthReporter(logger slog.Logger, apps []codersdk.Workspace
 							return err
 						}
 						// successful healthcheck is a non-5XX status code
-						res.Body.Close()
+						_ = res.Body.Close()
 						if res.StatusCode >= http.StatusInternalServerError {
 							return xerrors.Errorf("error status code: %d", res.StatusCode)
 						}
@@ -131,7 +133,7 @@ func NewWorkspaceAppHealthReporter(logger slog.Logger, apps []codersdk.Workspace
 				mu.Lock()
 				lastHealth = copyHealth(health)
 				mu.Unlock()
-				err := postWorkspaceAgentAppHealth(ctx, codersdk.PostWorkspaceAppHealthsRequest{
+				err := postWorkspaceAgentAppHealth(ctx, agentsdk.PostAppHealthsRequest{
 					Healths: lastHealth,
 				})
 				if err != nil {

@@ -15,15 +15,20 @@ message AcquiredJob {
         string workspace_build_id = 1;
         string workspace_name = 2;
         repeated provisioner.ParameterValue parameter_values = 3;
-        provisioner.Provision.Metadata metadata = 4;
-        bytes state = 5;
+        repeated provisioner.RichParameterValue rich_parameter_values = 4;
+		repeated provisioner.VariableValue variable_values = 5;
+        provisioner.Provision.Metadata metadata = 6;
+        bytes state = 7;
     }
     message TemplateImport {
         provisioner.Provision.Metadata metadata = 1;
+		repeated provisioner.VariableValue user_variable_values = 2;
     }
     message TemplateDryRun {
         repeated provisioner.ParameterValue parameter_values = 1;
-        provisioner.Provision.Metadata metadata = 2;
+        repeated provisioner.RichParameterValue rich_parameter_values = 2;
+		repeated provisioner.VariableValue variable_values = 3;
+        provisioner.Provision.Metadata metadata = 4;
     }
 
     string job_id = 1;
@@ -63,6 +68,7 @@ message CompletedJob {
     message TemplateImport {
         repeated provisioner.Resource start_resources = 1;
         repeated provisioner.Resource stop_resources = 2;
+        repeated provisioner.RichParameter rich_parameters = 3;
     }
     message TemplateDryRun {
         repeated provisioner.Resource resources = 1;
@@ -96,7 +102,9 @@ message UpdateJobRequest {
     string job_id = 1;
     repeated Log logs = 2;
     repeated provisioner.ParameterSchema parameter_schemas = 3;
-    bytes readme = 4;
+    repeated provisioner.TemplateVariable template_variables = 4;
+	repeated provisioner.VariableValue user_variable_values = 5;
+    bytes readme = 6;
 }
 
 message UpdateJobResponse {
@@ -104,6 +112,18 @@ message UpdateJobResponse {
     // If parameter schemas are sent, the job will respond
     // with resolved parameter values.
     repeated provisioner.ParameterValue parameter_values = 2;
+	repeated provisioner.VariableValue variable_values = 3;
+}
+
+message CommitQuotaRequest {
+    string job_id = 1;
+    int32 daily_cost = 2;
+}
+
+message CommitQuotaResponse {
+    bool ok = 1;
+    int32 credits_consumed = 2;
+    int32 budget = 3;
 }
 
 service ProvisionerDaemon {
@@ -111,6 +131,8 @@ service ProvisionerDaemon {
     // hold a lock on the job until CompleteJob() is
     // called with the matching ID.
     rpc AcquireJob(Empty) returns (AcquiredJob);
+
+    rpc CommitQuota(CommitQuotaRequest) returns (CommitQuotaResponse);
 
     // UpdateJob streams periodic updates for a job.
     // Implementations should buffer logs so this stream

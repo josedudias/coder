@@ -1,14 +1,26 @@
 import react from "@vitejs/plugin-react"
 import path from "path"
-import { defineConfig } from "vite"
+import { defineConfig, PluginOption } from "vite"
+import { visualizer } from "rollup-plugin-visualizer"
+
+const plugins: PluginOption[] = [react()]
+
+if (process.env.STATS !== undefined) {
+  plugins.push(
+    visualizer({
+      filename: "./stats/index.html",
+    }),
+  )
+}
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: plugins,
   publicDir: path.resolve(__dirname, "./static"),
   build: {
     outDir: path.resolve(__dirname, "./out"),
     // We need to keep the /bin folder and GITKEEP files
     emptyOutDir: false,
+    sourcemap: process.env.NODE_ENV === "development",
   },
   define: {
     "process.env": {
@@ -22,6 +34,10 @@ export default defineConfig({
       "/api": {
         target: process.env.CODER_HOST || "http://localhost:3000",
         ws: true,
+        secure: process.env.NODE_ENV === "production",
+      },
+      "/swagger": {
+        target: process.env.CODER_HOST || "http://localhost:3000",
         secure: process.env.NODE_ENV === "production",
       },
     },

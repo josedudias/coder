@@ -10,11 +10,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/coder/coder/coderd"
 	"github.com/coder/coder/coderd/audit"
 	"github.com/coder/coder/coderd/coderdtest"
 	"github.com/coder/coder/coderd/database"
@@ -49,10 +47,9 @@ func TestFirstUser(t *testing.T) {
 		defer cancel()
 
 		_, err := client.CreateFirstUser(ctx, codersdk.CreateFirstUserRequest{
-			Email:            "some@email.com",
-			Username:         "exampleuser",
-			Password:         "password",
-			OrganizationName: "someorg",
+			Email:    "some@email.com",
+			Username: "exampleuser",
+			Password: "SomeSecurePassword!",
 		})
 		var apiErr *codersdk.Error
 		require.ErrorAs(t, err, &apiErr)
@@ -65,104 +62,28 @@ func TestFirstUser(t *testing.T) {
 		_ = coderdtest.CreateFirstUser(t, client)
 	})
 
-	t.Run("LastSeenAt", func(t *testing.T) {
+	t.Run("Trial", func(t *testing.T) {
 		t.Parallel()
-		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
-		defer cancel()
-
-		client := coderdtest.New(t, nil)
-		firstUserResp := coderdtest.CreateFirstUser(t, client)
-
-		firstUser, err := client.User(ctx, firstUserResp.UserID.String())
-		require.NoError(t, err)
-
-		_ = coderdtest.CreateAnotherUser(t, client, firstUserResp.OrganizationID)
-
-		allUsers, err := client.Users(ctx, codersdk.UsersRequest{})
-		require.NoError(t, err)
-
-		require.Len(t, allUsers, 2)
-
-		// We sent the "GET Users" request with the first user, but the second user
-		// should be Never since they haven't performed a request.
-		for _, user := range allUsers {
-			if user.ID == firstUser.ID {
-				require.WithinDuration(t, firstUser.LastSeenAt, database.Now(), testutil.WaitShort)
-			} else {
-				require.Zero(t, user.LastSeenAt)
-			}
-		}
-	})
-
-	t.Run("AutoImportsTemplates", func(t *testing.T) {
-		t.Parallel()
-
-		// All available auto import templates should be added to this list, and
-		// also added to the switch statement below.
-		autoImportTemplates := []coderd.AutoImportTemplate{
-			coderd.AutoImportTemplateKubernetes,
-		}
+		called := make(chan struct{})
 		client := coderdtest.New(t, &coderdtest.Options{
-			AutoImportTemplates: autoImportTemplates,
+			TrialGenerator: func(ctx context.Context, s string) error {
+				close(called)
+				return nil
+			},
 		})
-		u := coderdtest.CreateFirstUser(t, client)
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
 
-		templates, err := client.TemplatesByOrganization(ctx, u.OrganizationID)
-		require.NoError(t, err, "list templates")
-		require.Len(t, templates, len(autoImportTemplates), "listed templates count does not match")
-		require.ElementsMatch(t, autoImportTemplates, []coderd.AutoImportTemplate{
-			coderd.AutoImportTemplate(templates[0].Name),
-		}, "template names don't match")
-
-		for _, template := range templates {
-			// Check template parameters.
-			templateParams, err := client.Parameters(ctx, codersdk.ParameterTemplate, template.ID)
-			require.NoErrorf(t, err, "get template parameters for %q", template.Name)
-
-			// Ensure all template parameters are present.
-			expectedParams := map[string]bool{}
-			switch template.Name {
-			case "kubernetes":
-				expectedParams["use_kubeconfig"] = false
-				expectedParams["namespace"] = false
-			default:
-				t.Fatalf("unexpected template name %q", template.Name)
-			}
-			for _, v := range templateParams {
-				if _, ok := expectedParams[v.Name]; !ok {
-					t.Fatalf("unexpected template parameter %q in template %q", v.Name, template.Name)
-				}
-				expectedParams[v.Name] = true
-			}
-			for k, v := range expectedParams {
-				if !v {
-					t.Fatalf("missing template parameter %q in template %q", k, template.Name)
-				}
-			}
-
-			// Ensure template version is legit
-			templateVersion, err := client.TemplateVersion(ctx, template.ActiveVersionID)
-			require.NoErrorf(t, err, "get template version for %q", template.Name)
-
-			// Compare job parameters to template parameters.
-			jobParams, err := client.Parameters(ctx, codersdk.ParameterImportJob, templateVersion.Job.ID)
-			require.NoErrorf(t, err, "get template import job parameters for %q", template.Name)
-			for _, v := range jobParams {
-				if _, ok := expectedParams[v.Name]; !ok {
-					t.Fatalf("unexpected job parameter %q for template %q", v.Name, template.Name)
-				}
-				// Change it back to false so we can reuse the map
-				expectedParams[v.Name] = false
-			}
-			for k, v := range expectedParams {
-				if v {
-					t.Fatalf("missing job parameter %q for template %q", k, template.Name)
-				}
-			}
+		req := codersdk.CreateFirstUserRequest{
+			Email:    "testuser@coder.com",
+			Username: "testuser",
+			Password: "SomeSecurePassword!",
+			Trial:    true,
 		}
+		_, err := client.CreateFirstUser(ctx, req)
+		require.NoError(t, err)
+		<-called
 	})
 }
 
@@ -170,7 +91,9 @@ func TestPostLogin(t *testing.T) {
 	t.Parallel()
 	t.Run("InvalidUser", func(t *testing.T) {
 		t.Parallel()
-		client := coderdtest.New(t, nil)
+		auditor := audit.NewMock()
+		client := coderdtest.New(t, &coderdtest.Options{Auditor: auditor})
+		numLogs := len(auditor.AuditLogs)
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
@@ -179,23 +102,28 @@ func TestPostLogin(t *testing.T) {
 			Email:    "my@email.org",
 			Password: "password",
 		})
+		numLogs++ // add an audit log for login
 		var apiErr *codersdk.Error
 		require.ErrorAs(t, err, &apiErr)
 		require.Equal(t, http.StatusUnauthorized, apiErr.StatusCode())
+
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
 	})
 
 	t.Run("BadPassword", func(t *testing.T) {
 		t.Parallel()
-		client := coderdtest.New(t, nil)
+		auditor := audit.NewMock()
+		client := coderdtest.New(t, &coderdtest.Options{Auditor: auditor})
+		numLogs := len(auditor.AuditLogs)
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
 
 		req := codersdk.CreateFirstUserRequest{
-			Email:            "testuser@coder.com",
-			Username:         "testuser",
-			Password:         "testpass",
-			OrganizationName: "testorg",
+			Email:    "testuser@coder.com",
+			Username: "testuser",
+			Password: "SomeSecurePassword!",
 		}
 		_, err := client.CreateFirstUser(ctx, req)
 		require.NoError(t, err)
@@ -203,17 +131,26 @@ func TestPostLogin(t *testing.T) {
 			Email:    req.Email,
 			Password: "badpass",
 		})
+		numLogs++ // add an audit log for login
 		var apiErr *codersdk.Error
 		require.ErrorAs(t, err, &apiErr)
 		require.Equal(t, http.StatusUnauthorized, apiErr.StatusCode())
+
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
 	})
 
 	t.Run("Suspended", func(t *testing.T) {
 		t.Parallel()
-		client := coderdtest.New(t, nil)
+		auditor := audit.NewMock()
+		client := coderdtest.New(t, &coderdtest.Options{Auditor: auditor})
+		numLogs := len(auditor.AuditLogs)
 		first := coderdtest.CreateFirstUser(t, client)
+		numLogs++ // add an audit log for create user
+		numLogs++ // add an audit log for login
 
-		member := coderdtest.CreateAnotherUser(t, client, first.OrganizationID)
+		member, _ := coderdtest.CreateAnotherUser(t, client, first.OrganizationID)
+		numLogs++ // add an audit log for create user
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
@@ -223,6 +160,7 @@ func TestPostLogin(t *testing.T) {
 
 		_, err = client.UpdateUserStatus(ctx, memberUser.Username, codersdk.UserStatusSuspended)
 		require.NoError(t, err, "suspend member")
+		numLogs++ // add an audit log for update user
 
 		// Test an existing session
 		_, err = member.User(ctx, codersdk.Me)
@@ -234,28 +172,72 @@ func TestPostLogin(t *testing.T) {
 		// Test a new session
 		_, err = client.LoginWithPassword(ctx, codersdk.LoginWithPasswordRequest{
 			Email:    memberUser.Email,
-			Password: "testpass",
+			Password: "SomeSecurePassword!",
 		})
+		numLogs++ // add an audit log for login
 		require.ErrorAs(t, err, &apiErr)
 		require.Equal(t, http.StatusUnauthorized, apiErr.StatusCode())
 		require.Contains(t, apiErr.Message, "suspended")
+
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
+	})
+
+	t.Run("DisabledPasswordAuth", func(t *testing.T) {
+		t.Parallel()
+
+		dc := coderdtest.DeploymentConfig(t)
+		client := coderdtest.New(t, &coderdtest.Options{
+			DeploymentConfig: dc,
+		})
+
+		first := coderdtest.CreateFirstUser(t, client)
+
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+		defer cancel()
+
+		// With a user account.
+		const password = "SomeSecurePassword!"
+		user, err := client.CreateUser(ctx, codersdk.CreateUserRequest{
+			Email:          "test+user-@coder.com",
+			Username:       "user",
+			Password:       password,
+			OrganizationID: first.OrganizationID,
+		})
+		require.NoError(t, err)
+
+		dc.DisablePasswordAuth.Value = true
+
+		userClient := codersdk.New(client.URL)
+		_, err = userClient.LoginWithPassword(ctx, codersdk.LoginWithPasswordRequest{
+			Email:    user.Email,
+			Password: password,
+		})
+		require.Error(t, err)
+		var apiErr *codersdk.Error
+		require.ErrorAs(t, err, &apiErr)
+		require.Equal(t, http.StatusForbidden, apiErr.StatusCode())
+		require.Contains(t, apiErr.Message, "Password authentication is disabled")
 	})
 
 	t.Run("Success", func(t *testing.T) {
 		t.Parallel()
-		client := coderdtest.New(t, nil)
+		auditor := audit.NewMock()
+		client := coderdtest.New(t, &coderdtest.Options{Auditor: auditor})
+		numLogs := len(auditor.AuditLogs)
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
 
 		req := codersdk.CreateFirstUserRequest{
-			Email:            "testuser@coder.com",
-			Username:         "testuser",
-			Password:         "testpass",
-			OrganizationName: "testorg",
+			Email:    "testuser@coder.com",
+			Username: "testuser",
+			Password: "SomeSecurePassword!",
 		}
 		_, err := client.CreateFirstUser(ctx, req)
 		require.NoError(t, err)
+		numLogs++ // add an audit log for create user
+		numLogs++ // add an audit log for login
 
 		_, err = client.LoginWithPassword(ctx, codersdk.LoginWithPasswordRequest{
 			Email:    req.Email,
@@ -269,6 +251,9 @@ func TestPostLogin(t *testing.T) {
 			Password: req.Password,
 		})
 		require.NoError(t, err)
+
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-1].Action)
 	})
 
 	t.Run("Lifetime&Expire", func(t *testing.T) {
@@ -281,7 +266,7 @@ func TestPostLogin(t *testing.T) {
 		defer cancel()
 
 		split := strings.Split(client.SessionToken(), "-")
-		key, err := client.GetAPIKey(ctx, admin.UserID.String(), split[0])
+		key, err := client.APIKey(ctx, admin.UserID.String(), split[0])
 		require.NoError(t, err, "fetch login key")
 		require.Equal(t, int64(86400), key.LifetimeSeconds, "default should be 86400")
 
@@ -289,10 +274,11 @@ func TestPostLogin(t *testing.T) {
 		token, err := client.CreateToken(ctx, codersdk.Me, codersdk.CreateTokenRequest{})
 		require.NoError(t, err, "make new token api key")
 		split = strings.Split(token.Key, "-")
-		apiKey, err := client.GetAPIKey(ctx, admin.UserID.String(), split[0])
+		apiKey, err := client.APIKey(ctx, admin.UserID.String(), split[0])
 		require.NoError(t, err, "fetch api key")
 
-		require.True(t, apiKey.ExpiresAt.After(time.Now().Add(time.Hour*438300)), "tokens lasts more than 50 years")
+		require.True(t, apiKey.ExpiresAt.After(time.Now().Add(time.Hour*24*29)), "default tokens lasts more than 29 days")
+		require.True(t, apiKey.ExpiresAt.Before(time.Now().Add(time.Hour*24*31)), "default tokens lasts less than 31 days")
 		require.Greater(t, apiKey.LifetimeSeconds, key.LifetimeSeconds, "token should have longer lifetime")
 	})
 }
@@ -303,14 +289,14 @@ func TestDeleteUser(t *testing.T) {
 		t.Parallel()
 		api := coderdtest.New(t, nil)
 		user := coderdtest.CreateFirstUser(t, api)
-		_, another := coderdtest.CreateAnotherUserWithUser(t, api, user.OrganizationID)
+		_, another := coderdtest.CreateAnotherUser(t, api, user.OrganizationID)
 		err := api.DeleteUser(context.Background(), another.ID)
 		require.NoError(t, err)
 		// Attempt to create a user with the same email and username, and delete them again.
 		another, err = api.CreateUser(context.Background(), codersdk.CreateUserRequest{
 			Email:          another.Email,
 			Username:       another.Username,
-			Password:       "testing",
+			Password:       "SomeSecurePassword!",
 			OrganizationID: user.OrganizationID,
 		})
 		require.NoError(t, err)
@@ -321,7 +307,7 @@ func TestDeleteUser(t *testing.T) {
 		t.Parallel()
 		api := coderdtest.New(t, nil)
 		firstUser := coderdtest.CreateFirstUser(t, api)
-		client, _ := coderdtest.CreateAnotherUserWithUser(t, api, firstUser.OrganizationID)
+		client, _ := coderdtest.CreateAnotherUser(t, api, firstUser.OrganizationID)
 		err := client.DeleteUser(context.Background(), firstUser.UserID)
 		var apiErr *codersdk.Error
 		require.ErrorAs(t, err, &apiErr)
@@ -331,7 +317,7 @@ func TestDeleteUser(t *testing.T) {
 		t.Parallel()
 		client, _ := coderdtest.NewWithProvisionerCloser(t, nil)
 		user := coderdtest.CreateFirstUser(t, client)
-		anotherClient, another := coderdtest.CreateAnotherUserWithUser(t, client, user.OrganizationID)
+		anotherClient, another := coderdtest.CreateAnotherUser(t, client, user.OrganizationID)
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, nil)
 		coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
 		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
@@ -349,15 +335,18 @@ func TestPostLogout(t *testing.T) {
 	// Checks that the cookie is cleared and the API Key is deleted from the database.
 	t.Run("Logout", func(t *testing.T) {
 		t.Parallel()
+		auditor := audit.NewMock()
+		client := coderdtest.New(t, &coderdtest.Options{Auditor: auditor})
+		numLogs := len(auditor.AuditLogs)
 
-		client := coderdtest.New(t, nil)
 		admin := coderdtest.CreateFirstUser(t, client)
+		numLogs++ // add an audit log for login
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
 
 		keyID := strings.Split(client.SessionToken(), "-")[0]
-		apiKey, err := client.GetAPIKey(ctx, admin.UserID.String(), keyID)
+		apiKey, err := client.APIKey(ctx, admin.UserID.String(), keyID)
 		require.NoError(t, err)
 		require.Equal(t, keyID, apiKey.ID, "API key should exist in the database")
 
@@ -365,23 +354,28 @@ func TestPostLogout(t *testing.T) {
 		require.NoError(t, err, "Server URL should parse successfully")
 
 		res, err := client.Request(ctx, http.MethodPost, fullURL.String(), nil)
+		numLogs++ // add an audit log for logout
+
 		require.NoError(t, err, "/logout request should succeed")
 		res.Body.Close()
 		require.Equal(t, http.StatusOK, res.StatusCode)
+
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionLogout, auditor.AuditLogs[numLogs-1].Action)
 
 		cookies := res.Cookies()
 
 		var found bool
 		for _, cookie := range cookies {
-			if cookie.Name == codersdk.SessionTokenKey {
-				require.Equal(t, codersdk.SessionTokenKey, cookie.Name, "Cookie should be the auth cookie")
+			if cookie.Name == codersdk.SessionTokenCookie {
+				require.Equal(t, codersdk.SessionTokenCookie, cookie.Name, "Cookie should be the auth cookie")
 				require.Equal(t, -1, cookie.MaxAge, "Cookie should be set to delete")
 				found = true
 			}
 		}
 		require.True(t, found, "auth cookie should be returned")
 
-		_, err = client.GetAPIKey(ctx, admin.UserID.String(), keyID)
+		_, err = client.APIKey(ctx, admin.UserID.String(), keyID)
 		sdkErr := &codersdk.Error{}
 		require.ErrorAs(t, err, &sdkErr)
 		require.Equal(t, http.StatusUnauthorized, sdkErr.StatusCode(), "Expecting 401")
@@ -414,7 +408,7 @@ func TestPostUsers(t *testing.T) {
 		_, err = client.CreateUser(ctx, codersdk.CreateUserRequest{
 			Email:          me.Email,
 			Username:       me.Username,
-			Password:       "password",
+			Password:       "MySecurePassword!",
 			OrganizationID: uuid.New(),
 		})
 		var apiErr *codersdk.Error
@@ -434,7 +428,7 @@ func TestPostUsers(t *testing.T) {
 			OrganizationID: uuid.New(),
 			Email:          "another@user.org",
 			Username:       "someone-else",
-			Password:       "testing",
+			Password:       "SomeSecurePassword!",
 		})
 		var apiErr *codersdk.Error
 		require.ErrorAs(t, err, &apiErr)
@@ -445,8 +439,8 @@ func TestPostUsers(t *testing.T) {
 		t.Parallel()
 		client := coderdtest.New(t, nil)
 		first := coderdtest.CreateFirstUser(t, client)
-		notInOrg := coderdtest.CreateAnotherUser(t, client, first.OrganizationID)
-		other := coderdtest.CreateAnotherUser(t, client, first.OrganizationID, rbac.RoleOwner(), rbac.RoleMember())
+		notInOrg, _ := coderdtest.CreateAnotherUser(t, client, first.OrganizationID)
+		other, _ := coderdtest.CreateAnotherUser(t, client, first.OrganizationID, rbac.RoleOwner(), rbac.RoleMember())
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
@@ -459,7 +453,7 @@ func TestPostUsers(t *testing.T) {
 		_, err = notInOrg.CreateUser(ctx, codersdk.CreateUserRequest{
 			Email:          "some@domain.com",
 			Username:       "anotheruser",
-			Password:       "testing",
+			Password:       "SomeSecurePassword!",
 			OrganizationID: org.ID,
 		})
 		var apiErr *codersdk.Error
@@ -471,7 +465,11 @@ func TestPostUsers(t *testing.T) {
 		t.Parallel()
 		auditor := audit.NewMock()
 		client := coderdtest.New(t, &coderdtest.Options{Auditor: auditor})
+		numLogs := len(auditor.AuditLogs)
+
 		user := coderdtest.CreateFirstUser(t, client)
+		numLogs++ // add an audit log for user create
+		numLogs++ // add an audit log for login
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
@@ -480,12 +478,42 @@ func TestPostUsers(t *testing.T) {
 			OrganizationID: user.OrganizationID,
 			Email:          "another@user.org",
 			Username:       "someone-else",
-			Password:       "testing",
+			Password:       "SomeSecurePassword!",
 		})
 		require.NoError(t, err)
 
-		require.Len(t, auditor.AuditLogs, 1)
-		assert.Equal(t, database.AuditActionCreate, auditor.AuditLogs[0].Action)
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionCreate, auditor.AuditLogs[numLogs-1].Action)
+		require.Equal(t, database.AuditActionLogin, auditor.AuditLogs[numLogs-2].Action)
+	})
+
+	t.Run("LastSeenAt", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+		defer cancel()
+
+		client := coderdtest.New(t, nil)
+		firstUserResp := coderdtest.CreateFirstUser(t, client)
+
+		firstUser, err := client.User(ctx, firstUserResp.UserID.String())
+		require.NoError(t, err)
+
+		_, _ = coderdtest.CreateAnotherUser(t, client, firstUserResp.OrganizationID)
+
+		allUsersRes, err := client.Users(ctx, codersdk.UsersRequest{})
+		require.NoError(t, err)
+
+		require.Len(t, allUsersRes.Users, 2)
+
+		// We sent the "GET Users" request with the first user, but the second user
+		// should be Never since they haven't performed a request.
+		for _, user := range allUsersRes.Users {
+			if user.ID == firstUser.ID {
+				require.WithinDuration(t, firstUser.LastSeenAt, database.Now(), testutil.WaitShort)
+			} else {
+				require.Zero(t, user.LastSeenAt)
+			}
+		}
 	})
 }
 
@@ -520,7 +548,7 @@ func TestUpdateUserProfile(t *testing.T) {
 		existentUser, err := client.CreateUser(ctx, codersdk.CreateUserRequest{
 			Email:          "bruno@coder.com",
 			Username:       "bruno",
-			Password:       "password",
+			Password:       "SomeSecurePassword!",
 			OrganizationID: user.OrganizationID,
 		})
 		require.NoError(t, err)
@@ -536,7 +564,10 @@ func TestUpdateUserProfile(t *testing.T) {
 		t.Parallel()
 		auditor := audit.NewMock()
 		client := coderdtest.New(t, &coderdtest.Options{Auditor: auditor})
+		numLogs := len(auditor.AuditLogs)
+
 		coderdtest.CreateFirstUser(t, client)
+		numLogs++ // add an audit log for login
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
@@ -547,8 +578,10 @@ func TestUpdateUserProfile(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Equal(t, userProfile.Username, "newusername")
-		assert.Len(t, auditor.AuditLogs, 1)
-		assert.Equal(t, database.AuditActionWrite, auditor.AuditLogs[0].Action)
+		numLogs++ // add an audit log for user update
+
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionWrite, auditor.AuditLogs[numLogs-1].Action)
 	})
 }
 
@@ -559,7 +592,7 @@ func TestUpdateUserPassword(t *testing.T) {
 		t.Parallel()
 		client := coderdtest.New(t, nil)
 		admin := coderdtest.CreateFirstUser(t, client)
-		member := coderdtest.CreateAnotherUser(t, client, admin.OrganizationID)
+		member, _ := coderdtest.CreateAnotherUser(t, client, admin.OrganizationID)
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
@@ -581,18 +614,18 @@ func TestUpdateUserPassword(t *testing.T) {
 		member, err := client.CreateUser(ctx, codersdk.CreateUserRequest{
 			Email:          "coder@coder.com",
 			Username:       "coder",
-			Password:       "password",
+			Password:       "SomeStrongPassword!",
 			OrganizationID: admin.OrganizationID,
 		})
 		require.NoError(t, err, "create member")
 		err = client.UpdateUserPassword(ctx, member.ID.String(), codersdk.UpdateUserPasswordRequest{
-			Password: "newpassword",
+			Password: "SomeNewStrongPassword!",
 		})
 		require.NoError(t, err, "admin should be able to update member password")
 		// Check if the member can login using the new password
 		_, err = client.LoginWithPassword(ctx, codersdk.LoginWithPasswordRequest{
 			Email:    "coder@coder.com",
-			Password: "newpassword",
+			Password: "SomeNewStrongPassword!",
 		})
 		require.NoError(t, err, "member should login successfully with the new password")
 	})
@@ -600,25 +633,34 @@ func TestUpdateUserPassword(t *testing.T) {
 		t.Parallel()
 		auditor := audit.NewMock()
 		client := coderdtest.New(t, &coderdtest.Options{Auditor: auditor})
+		numLogs := len(auditor.AuditLogs)
+
 		admin := coderdtest.CreateFirstUser(t, client)
-		member := coderdtest.CreateAnotherUser(t, client, admin.OrganizationID)
+		numLogs++ // add an audit log for user create
+		numLogs++ // add an audit log for login
+
+		member, _ := coderdtest.CreateAnotherUser(t, client, admin.OrganizationID)
+		numLogs++ // add an audit log for user create
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
 
 		err := member.UpdateUserPassword(ctx, "me", codersdk.UpdateUserPasswordRequest{
-			OldPassword: "testpass",
-			Password:    "newpassword",
+			OldPassword: "SomeSecurePassword!",
+			Password:    "MyNewSecurePassword!",
 		})
+		numLogs++ // add an audit log for user update
+
 		require.NoError(t, err, "member should be able to update own password")
-		assert.Len(t, auditor.AuditLogs, 2)
-		assert.Equal(t, database.AuditActionWrite, auditor.AuditLogs[1].Action)
+
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionWrite, auditor.AuditLogs[numLogs-1].Action)
 	})
 	t.Run("MemberCantUpdateOwnPasswordWithoutOldPassword", func(t *testing.T) {
 		t.Parallel()
 		client := coderdtest.New(t, nil)
 		admin := coderdtest.CreateFirstUser(t, client)
-		member := coderdtest.CreateAnotherUser(t, client, admin.OrganizationID)
+		member, _ := coderdtest.CreateAnotherUser(t, client, admin.OrganizationID)
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
@@ -632,17 +674,23 @@ func TestUpdateUserPassword(t *testing.T) {
 		t.Parallel()
 		auditor := audit.NewMock()
 		client := coderdtest.New(t, &coderdtest.Options{Auditor: auditor})
+		numLogs := len(auditor.AuditLogs)
+
 		_ = coderdtest.CreateFirstUser(t, client)
+		numLogs++ // add an audit log for login
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
 
 		err := client.UpdateUserPassword(ctx, "me", codersdk.UpdateUserPasswordRequest{
-			Password: "newpassword",
+			Password: "MySecurePassword!",
 		})
+		numLogs++ // add an audit log for user update
+
 		require.NoError(t, err, "admin should be able to update own password without providing old password")
-		assert.Len(t, auditor.AuditLogs, 1)
-		assert.Equal(t, database.AuditActionWrite, auditor.AuditLogs[0].Action)
+
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionWrite, auditor.AuditLogs[numLogs-1].Action)
 	})
 
 	t.Run("ChangingPasswordDeletesKeys", func(t *testing.T) {
@@ -659,20 +707,20 @@ func TestUpdateUserPassword(t *testing.T) {
 		require.NoError(t, err)
 
 		err = client.UpdateUserPassword(ctx, "me", codersdk.UpdateUserPasswordRequest{
-			Password: "newpassword",
+			Password: "MyNewSecurePassword!",
 		})
 		require.NoError(t, err)
 
 		// Trying to get an API key should fail since our client's token
 		// has been deleted.
-		_, err = client.GetAPIKey(ctx, user.UserID.String(), apikey1.Key)
+		_, err = client.APIKey(ctx, user.UserID.String(), apikey1.Key)
 		require.Error(t, err)
 		cerr := coderdtest.SDKError(t, err)
 		require.Equal(t, http.StatusUnauthorized, cerr.StatusCode())
 
 		resp, err := client.LoginWithPassword(ctx, codersdk.LoginWithPasswordRequest{
 			Email:    coderdtest.FirstUserParams.Email,
-			Password: "newpassword",
+			Password: "MyNewSecurePassword!",
 		})
 		require.NoError(t, err)
 
@@ -680,12 +728,12 @@ func TestUpdateUserPassword(t *testing.T) {
 
 		// Trying to get an API key should fail since all keys are deleted
 		// on password change.
-		_, err = client.GetAPIKey(ctx, user.UserID.String(), apikey1.Key)
+		_, err = client.APIKey(ctx, user.UserID.String(), apikey1.Key)
 		require.Error(t, err)
 		cerr = coderdtest.SDKError(t, err)
 		require.Equal(t, http.StatusNotFound, cerr.StatusCode())
 
-		_, err = client.GetAPIKey(ctx, user.UserID.String(), apikey2.Key)
+		_, err = client.APIKey(ctx, user.UserID.String(), apikey2.Key)
 		require.Error(t, err)
 		cerr = coderdtest.SDKError(t, err)
 		require.Equal(t, http.StatusNotFound, cerr.StatusCode())
@@ -723,14 +771,14 @@ func TestGrantSiteRoles(t *testing.T) {
 
 	admin := coderdtest.New(t, nil)
 	first := coderdtest.CreateFirstUser(t, admin)
-	member := coderdtest.CreateAnotherUser(t, admin, first.OrganizationID)
-	orgAdmin := coderdtest.CreateAnotherUser(t, admin, first.OrganizationID, rbac.RoleOrgAdmin(first.OrganizationID))
+	member, _ := coderdtest.CreateAnotherUser(t, admin, first.OrganizationID)
+	orgAdmin, _ := coderdtest.CreateAnotherUser(t, admin, first.OrganizationID, rbac.RoleOrgAdmin(first.OrganizationID))
 	randOrg, err := admin.CreateOrganization(ctx, codersdk.CreateOrganizationRequest{
 		Name: "random",
 	})
 	require.NoError(t, err)
-	_, randOrgUser := coderdtest.CreateAnotherUserWithUser(t, admin, randOrg.ID, rbac.RoleOrgAdmin(randOrg.ID))
-	userAdmin := coderdtest.CreateAnotherUser(t, admin, first.OrganizationID, rbac.RoleUserAdmin())
+	_, randOrgUser := coderdtest.CreateAnotherUser(t, admin, randOrg.ID, rbac.RoleOrgAdmin(randOrg.ID))
+	userAdmin, _ := coderdtest.CreateAnotherUser(t, admin, first.OrganizationID, rbac.RoleUserAdmin())
 
 	const newUser = "newUser"
 
@@ -793,16 +841,7 @@ func TestGrantSiteRoles(t *testing.T) {
 			AssignToUser: randOrgUser.ID.String(),
 			Roles:        []string{rbac.RoleOrgMember(randOrg.ID)},
 			Error:        true,
-			StatusCode:   http.StatusForbidden,
-		},
-		{
-			Name:         "MemberAssignMember",
-			Client:       member,
-			OrgID:        first.OrganizationID,
-			AssignToUser: first.UserID.String(),
-			Roles:        []string{},
-			Error:        true,
-			StatusCode:   http.StatusForbidden,
+			StatusCode:   http.StatusNotFound,
 		},
 		{
 			Name:         "AdminUpdateOrgSelf",
@@ -849,7 +888,7 @@ func TestGrantSiteRoles(t *testing.T) {
 				if c.OrgID != uuid.Nil {
 					orgID = c.OrgID
 				}
-				_, newUser := coderdtest.CreateAnotherUserWithUser(t, admin, orgID)
+				_, newUser := coderdtest.CreateAnotherUser(t, admin, orgID)
 				c.AssignToUser = newUser.ID.String()
 			}
 
@@ -892,14 +931,14 @@ func TestInitialRoles(t *testing.T) {
 	client := coderdtest.New(t, nil)
 	first := coderdtest.CreateFirstUser(t, client)
 
-	roles, err := client.GetUserRoles(ctx, codersdk.Me)
+	roles, err := client.UserRoles(ctx, codersdk.Me)
 	require.NoError(t, err)
 	require.ElementsMatch(t, roles.Roles, []string{
 		rbac.RoleOwner(),
 	}, "should be a member and admin")
 
 	require.ElementsMatch(t, roles.OrganizationRoles[first.OrganizationID], []string{
-		rbac.RoleOrgAdmin(first.OrganizationID),
+		rbac.RoleOrgMember(first.OrganizationID),
 	}, "should be a member and admin")
 }
 
@@ -910,7 +949,7 @@ func TestPutUserSuspend(t *testing.T) {
 		t.Parallel()
 		client := coderdtest.New(t, nil)
 		me := coderdtest.CreateFirstUser(t, client)
-		_, user := coderdtest.CreateAnotherUserWithUser(t, client, me.OrganizationID, rbac.RoleOwner())
+		_, user := coderdtest.CreateAnotherUser(t, client, me.OrganizationID, rbac.RoleOwner())
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
@@ -923,8 +962,14 @@ func TestPutUserSuspend(t *testing.T) {
 		t.Parallel()
 		auditor := audit.NewMock()
 		client := coderdtest.New(t, &coderdtest.Options{Auditor: auditor})
+		numLogs := len(auditor.AuditLogs)
+
 		me := coderdtest.CreateFirstUser(t, client)
-		_, user := coderdtest.CreateAnotherUserWithUser(t, client, me.OrganizationID)
+		numLogs++ // add an audit log for user create
+		numLogs++ // add an audit log for login
+
+		_, user := coderdtest.CreateAnotherUser(t, client, me.OrganizationID)
+		numLogs++ // add an audit log for user create
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
@@ -932,8 +977,10 @@ func TestPutUserSuspend(t *testing.T) {
 		user, err := client.UpdateUserStatus(ctx, user.Username, codersdk.UserStatusSuspended)
 		require.NoError(t, err)
 		require.Equal(t, user.Status, codersdk.UserStatusSuspended)
-		assert.Len(t, auditor.AuditLogs, 2)
-		assert.Equal(t, database.AuditActionWrite, auditor.AuditLogs[1].Action)
+		numLogs++ // add an audit log for user update
+
+		require.Len(t, auditor.AuditLogs, numLogs)
+		require.Equal(t, database.AuditActionWrite, auditor.AuditLogs[numLogs-1].Action)
 	})
 
 	t.Run("SuspendItSelf", func(t *testing.T) {
@@ -1025,7 +1072,7 @@ func TestUsersFilter(t *testing.T) {
 		if i%3 == 0 {
 			roles = append(roles, "auditor")
 		}
-		userClient := coderdtest.CreateAnotherUser(t, client, first.OrganizationID, roles...)
+		userClient, _ := coderdtest.CreateAnotherUser(t, client, first.OrganizationID, roles...)
 		user, err := userClient.User(ctx, codersdk.Me)
 		require.NoError(t, err, "fetch me")
 
@@ -1186,7 +1233,7 @@ func TestUsersFilter(t *testing.T) {
 					exp = append(exp, made)
 				}
 			}
-			require.ElementsMatch(t, exp, matched, "expected workspaces returned")
+			require.ElementsMatch(t, exp, matched.Users, "expected workspaces returned")
 		})
 	}
 }
@@ -1204,14 +1251,14 @@ func TestGetUsers(t *testing.T) {
 		client.CreateUser(ctx, codersdk.CreateUserRequest{
 			Email:          "alice@email.com",
 			Username:       "alice",
-			Password:       "password",
+			Password:       "MySecurePassword!",
 			OrganizationID: user.OrganizationID,
 		})
 		// No params is all users
-		users, err := client.Users(ctx, codersdk.UsersRequest{})
+		res, err := client.Users(ctx, codersdk.UsersRequest{})
 		require.NoError(t, err)
-		require.Len(t, users, 2)
-		require.Len(t, users[0].OrganizationIDs, 1)
+		require.Len(t, res.Users, 2)
+		require.Len(t, res.Users[0].OrganizationIDs, 1)
 	})
 	t.Run("ActiveUsers", func(t *testing.T) {
 		t.Parallel()
@@ -1230,7 +1277,7 @@ func TestGetUsers(t *testing.T) {
 		alice, err := client.CreateUser(ctx, codersdk.CreateUserRequest{
 			Email:          "alice@email.com",
 			Username:       "alice",
-			Password:       "password",
+			Password:       "MySecurePassword!",
 			OrganizationID: first.OrganizationID,
 		})
 		require.NoError(t, err)
@@ -1238,7 +1285,7 @@ func TestGetUsers(t *testing.T) {
 		bruno, err := client.CreateUser(ctx, codersdk.CreateUserRequest{
 			Email:          "bruno@email.com",
 			Username:       "bruno",
-			Password:       "password",
+			Password:       "MySecurePassword!",
 			OrganizationID: first.OrganizationID,
 		})
 		require.NoError(t, err)
@@ -1247,64 +1294,66 @@ func TestGetUsers(t *testing.T) {
 		_, err = client.UpdateUserStatus(ctx, alice.Username, codersdk.UserStatusSuspended)
 		require.NoError(t, err)
 
-		users, err := client.Users(ctx, codersdk.UsersRequest{
+		res, err := client.Users(ctx, codersdk.UsersRequest{
 			Status: codersdk.UserStatusActive,
 		})
 		require.NoError(t, err)
-		require.ElementsMatch(t, active, users)
+		require.ElementsMatch(t, active, res.Users)
 	})
 }
 
-func TestGetFilteredUserCount(t *testing.T) {
+func TestGetUsersPagination(t *testing.T) {
 	t.Parallel()
-	t.Run("AllUsers", func(t *testing.T) {
-		t.Parallel()
-		client := coderdtest.New(t, nil)
-		user := coderdtest.CreateFirstUser(t, client)
+	client := coderdtest.New(t, nil)
+	first := coderdtest.CreateFirstUser(t, client)
 
-		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
-		defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+	defer cancel()
 
-		client.CreateUser(ctx, codersdk.CreateUserRequest{
-			Email:          "alice@email.com",
-			Username:       "alice",
-			Password:       "password",
-			OrganizationID: user.OrganizationID,
-		})
-		// No params is all users
-		response, err := client.UserCount(ctx, codersdk.UserCountRequest{})
-		require.NoError(t, err)
-		require.Equal(t, 2, int(response.Count))
+	_, err := client.User(ctx, first.UserID.String())
+	require.NoError(t, err, "")
+
+	_, err = client.CreateUser(ctx, codersdk.CreateUserRequest{
+		Email:          "alice@email.com",
+		Username:       "alice",
+		Password:       "MySecurePassword!",
+		OrganizationID: first.OrganizationID,
 	})
-	t.Run("ActiveUsers", func(t *testing.T) {
-		t.Parallel()
-		client := coderdtest.New(t, nil)
-		first := coderdtest.CreateFirstUser(t, client)
+	require.NoError(t, err)
 
-		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
-		defer cancel()
+	res, err := client.Users(ctx, codersdk.UsersRequest{})
+	require.NoError(t, err)
+	require.Len(t, res.Users, 2)
+	require.Equal(t, res.Count, 2)
 
-		_, err := client.User(ctx, first.UserID.String())
-		require.NoError(t, err, "")
-
-		// Alice will be suspended
-		alice, err := client.CreateUser(ctx, codersdk.CreateUserRequest{
-			Email:          "alice@email.com",
-			Username:       "alice",
-			Password:       "password",
-			OrganizationID: first.OrganizationID,
-		})
-		require.NoError(t, err)
-
-		_, err = client.UpdateUserStatus(ctx, alice.Username, codersdk.UserStatusSuspended)
-		require.NoError(t, err)
-
-		response, err := client.UserCount(ctx, codersdk.UserCountRequest{
-			Status: codersdk.UserStatusActive,
-		})
-		require.NoError(t, err)
-		require.Equal(t, 1, int(response.Count))
+	res, err = client.Users(ctx, codersdk.UsersRequest{
+		Pagination: codersdk.Pagination{
+			Limit: 1,
+		},
 	})
+	require.NoError(t, err)
+	require.Len(t, res.Users, 1)
+	require.Equal(t, res.Count, 2)
+
+	res, err = client.Users(ctx, codersdk.UsersRequest{
+		Pagination: codersdk.Pagination{
+			Offset: 1,
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Users, 1)
+	require.Equal(t, res.Count, 2)
+
+	// if offset is higher than the count postgres returns an empty array
+	// and not an ErrNoRows error. This also means the count must be 0.
+	res, err = client.Users(ctx, codersdk.UsersRequest{
+		Pagination: codersdk.Pagination{
+			Offset: 3,
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Users, 0)
+	require.Equal(t, res.Count, 0)
 }
 
 func TestPostTokens(t *testing.T) {
@@ -1348,13 +1397,13 @@ func TestWorkspacesByUser(t *testing.T) {
 		newUser, err := client.CreateUser(ctx, codersdk.CreateUserRequest{
 			Email:          "test@coder.com",
 			Username:       "someone",
-			Password:       "password",
+			Password:       "MySecurePassword!",
 			OrganizationID: user.OrganizationID,
 		})
 		require.NoError(t, err)
 		auth, err := client.LoginWithPassword(ctx, codersdk.LoginWithPasswordRequest{
 			Email:    newUser.Email,
-			Password: "password",
+			Password: "MySecurePassword!",
 		})
 		require.NoError(t, err)
 
@@ -1382,7 +1431,7 @@ func TestWorkspacesByUser(t *testing.T) {
 func TestSuspendedPagination(t *testing.T) {
 	t.Parallel()
 	t.Skip("This fails when two users are created at the exact same time. The reason is unknown... See: https://github.com/coder/coder/actions/runs/3057047622/jobs/4931863163")
-	client := coderdtest.New(t, &coderdtest.Options{APIRateLimit: -1})
+	client := coderdtest.New(t, nil)
 	coderdtest.CreateFirstUser(t, client)
 
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
@@ -1401,7 +1450,7 @@ func TestSuspendedPagination(t *testing.T) {
 		user, err := client.CreateUser(ctx, codersdk.CreateUserRequest{
 			Email:          email,
 			Username:       username,
-			Password:       "password",
+			Password:       "MySecurePassword!",
 			OrganizationID: orgID,
 		})
 		require.NoError(t, err)
@@ -1420,14 +1469,14 @@ func TestSuspendedPagination(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	require.Equal(t, expected, page, "expected page")
+	require.Equal(t, expected, page.Users, "expected page")
 }
 
 // TestPaginatedUsers creates a list of users, then tries to paginate through
 // them using different page sizes.
 func TestPaginatedUsers(t *testing.T) {
 	t.Parallel()
-	client := coderdtest.New(t, &coderdtest.Options{APIRateLimit: -1})
+	client := coderdtest.New(t, nil)
 	coderdtest.CreateFirstUser(t, client)
 
 	// This test takes longer than a long time.
@@ -1464,7 +1513,7 @@ func TestPaginatedUsers(t *testing.T) {
 			newUser, err := client.CreateUser(egCtx, codersdk.CreateUserRequest{
 				Email:          email,
 				Username:       username,
-				Password:       "password",
+				Password:       "MySecurePassword!",
 				OrganizationID: orgID,
 			})
 			if err != nil {
@@ -1546,15 +1595,15 @@ func assertPagination(ctx context.Context, t *testing.T, client *codersdk.Client
 		},
 	}))
 	require.NoError(t, err, "first page")
-	require.Equalf(t, page, allUsers[:limit], "first page, limit=%d", limit)
-	count += len(page)
+	require.Equalf(t, page.Users, allUsers[:limit], "first page, limit=%d", limit)
+	count += len(page.Users)
 
 	for {
-		if len(page) == 0 {
+		if len(page.Users) == 0 {
 			break
 		}
 
-		afterCursor := page[len(page)-1].ID
+		afterCursor := page.Users[len(page.Users)-1].ID
 		// Assert each page is the next expected page
 		// This is using a cursor, and only works if all users created_at
 		// is unique.
@@ -1581,8 +1630,8 @@ func assertPagination(ctx context.Context, t *testing.T, client *codersdk.Client
 		} else {
 			expected = allUsers[count : count+limit]
 		}
-		require.Equalf(t, page, expected, "next users, after=%s, limit=%d", afterCursor, limit)
-		require.Equalf(t, offsetPage, expected, "offset users, offset=%d, limit=%d", count, limit)
+		require.Equalf(t, page.Users, expected, "next users, after=%s, limit=%d", afterCursor, limit)
+		require.Equalf(t, offsetPage.Users, expected, "offset users, offset=%d, limit=%d", count, limit)
 
 		// Also check the before
 		prevPage, err := client.Users(ctx, opt(codersdk.UsersRequest{
@@ -1592,8 +1641,8 @@ func assertPagination(ctx context.Context, t *testing.T, client *codersdk.Client
 			},
 		}))
 		require.NoError(t, err, "prev page")
-		require.Equal(t, allUsers[count-limit:count], prevPage, "prev users")
-		count += len(page)
+		require.Equal(t, allUsers[count-limit:count], prevPage.Users, "prev users")
+		count += len(page.Users)
 	}
 }
 

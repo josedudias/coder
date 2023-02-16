@@ -19,6 +19,7 @@ import (
 
 	"github.com/coder/coder/cli/cliflag"
 	"github.com/coder/coder/cli/cliui"
+	"github.com/coder/coder/coderd/userpassword"
 	"github.com/coder/coder/codersdk"
 )
 
@@ -38,17 +39,29 @@ func init() {
 }
 
 func login() *cobra.Command {
+	const firstUserTrialEnv = "CODER_FIRST_USER_TRIAL"
+
 	var (
 		email    string
 		username string
 		password string
+		trial    bool
 	)
 	cmd := &cobra.Command{
 		Use:   "login <url>",
 		Short: "Authenticate with Coder deployment",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rawURL := args[0]
+			rawURL := ""
+			if len(args) == 0 {
+				var err error
+				rawURL, err = cmd.Flags().GetString(varURL)
+				if err != nil {
+					return xerrors.Errorf("get global url flag")
+				}
+			} else {
+				rawURL = args[0]
+			}
 
 			if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
 				scheme := "https"
@@ -140,16 +153,19 @@ func login() *cobra.Command {
 
 					for !matching {
 						password, err = cliui.Prompt(cmd, cliui.PromptOptions{
-							Text:     "Enter a " + cliui.Styles.Field.Render("password") + ":",
-							Secret:   true,
-							Validate: cliui.ValidateNotEmpty,
+							Text:   "Enter a " + cliui.Styles.Field.Render("password") + ":",
+							Secret: true,
+							Validate: func(s string) error {
+								return userpassword.Validate(s)
+							},
 						})
 						if err != nil {
 							return xerrors.Errorf("specify password prompt: %w", err)
 						}
 						confirm, err := cliui.Prompt(cmd, cliui.PromptOptions{
-							Text:   "Confirm " + cliui.Styles.Field.Render("password") + ":",
-							Secret: true,
+							Text:     "Confirm " + cliui.Styles.Field.Render("password") + ":",
+							Secret:   true,
+							Validate: cliui.ValidateNotEmpty,
 						})
 						if err != nil {
 							return xerrors.Errorf("confirm password prompt: %w", err)
@@ -162,11 +178,20 @@ func login() *cobra.Command {
 					}
 				}
 
+				if !cmd.Flags().Changed("first-user-trial") && os.Getenv(firstUserTrialEnv) == "" {
+					v, _ := cliui.Prompt(cmd, cliui.PromptOptions{
+						Text:      "Start a 30-day trial of Enterprise?",
+						IsConfirm: true,
+						Default:   "yes",
+					})
+					trial = v == "yes" || v == "y"
+				}
+
 				_, err = client.CreateFirstUser(cmd.Context(), codersdk.CreateFirstUserRequest{
-					Email:            email,
-					Username:         username,
-					OrganizationName: username,
-					Password:         password,
+					Email:    email,
+					Username: username,
+					Password: password,
+					Trial:    trial,
 				})
 				if err != nil {
 					return xerrors.Errorf("create initial user: %w", err)
@@ -251,6 +276,7 @@ func login() *cobra.Command {
 	cliflag.StringVarP(cmd.Flags(), &email, "first-user-email", "", "CODER_FIRST_USER_EMAIL", "", "Specifies an email address to use if creating the first user for the deployment.")
 	cliflag.StringVarP(cmd.Flags(), &username, "first-user-username", "", "CODER_FIRST_USER_USERNAME", "", "Specifies a username to use if creating the first user for the deployment.")
 	cliflag.StringVarP(cmd.Flags(), &password, "first-user-password", "", "CODER_FIRST_USER_PASSWORD", "", "Specifies a password to use if creating the first user for the deployment.")
+	cliflag.BoolVarP(cmd.Flags(), &trial, "first-user-trial", "", firstUserTrialEnv, false, "Specifies whether a trial license should be provisioned for the Coder deployment or not.")
 	return cmd
 }
 

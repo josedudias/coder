@@ -35,50 +35,41 @@ type UsersRequest struct {
 
 // User represents a user in Coder.
 type User struct {
-	ID         uuid.UUID `json:"id" validate:"required" table:"id"`
-	Username   string    `json:"username" validate:"required" table:"username"`
-	Email      string    `json:"email" validate:"required" table:"email"`
-	CreatedAt  time.Time `json:"created_at" validate:"required" table:"created at"`
-	LastSeenAt time.Time `json:"last_seen_at"`
+	ID         uuid.UUID `json:"id" validate:"required" table:"id" format:"uuid"`
+	Username   string    `json:"username" validate:"required" table:"username,default_sort"`
+	Email      string    `json:"email" validate:"required" table:"email" format:"email"`
+	CreatedAt  time.Time `json:"created_at" validate:"required" table:"created at" format:"date-time"`
+	LastSeenAt time.Time `json:"last_seen_at" format:"date-time"`
 
-	Status          UserStatus  `json:"status" table:"status"`
-	OrganizationIDs []uuid.UUID `json:"organization_ids"`
+	Status          UserStatus  `json:"status" table:"status" enums:"active,suspended"`
+	OrganizationIDs []uuid.UUID `json:"organization_ids" format:"uuid"`
 	Roles           []Role      `json:"roles"`
-	AvatarURL       string      `json:"avatar_url"`
+	AvatarURL       string      `json:"avatar_url" format:"uri"`
 }
 
-type UserCountRequest struct {
-	Search string `json:"search,omitempty" typescript:"-"`
-	// Filter users by status.
-	Status UserStatus `json:"status,omitempty" typescript:"-"`
-	// Filter users that have the given role.
-	Role string `json:"role,omitempty" typescript:"-"`
-
-	SearchQuery string `json:"q,omitempty"`
-}
-
-type UserCountResponse struct {
-	Count int64 `json:"count"`
+type GetUsersResponse struct {
+	Users []User `json:"users"`
+	Count int    `json:"count"`
 }
 
 type CreateFirstUserRequest struct {
-	Email            string `json:"email" validate:"required,email"`
-	Username         string `json:"username" validate:"required,username"`
-	Password         string `json:"password" validate:"required"`
-	OrganizationName string `json:"organization" validate:"required,username"`
+	Email    string `json:"email" validate:"required,email"`
+	Username string `json:"username" validate:"required,username"`
+	Password string `json:"password" validate:"required"`
+	Trial    bool   `json:"trial"`
 }
 
 // CreateFirstUserResponse contains IDs for newly created user info.
 type CreateFirstUserResponse struct {
-	UserID         uuid.UUID `json:"user_id"`
-	OrganizationID uuid.UUID `json:"organization_id"`
+	UserID         uuid.UUID `json:"user_id" format:"uuid"`
+	OrganizationID uuid.UUID `json:"organization_id" format:"uuid"`
 }
 
 type CreateUserRequest struct {
-	Email          string    `json:"email" validate:"required,email"`
+	Email          string    `json:"email" validate:"required,email" format:"email"`
 	Username       string    `json:"username" validate:"required,username"`
 	Password       string    `json:"password" validate:"required"`
-	OrganizationID uuid.UUID `json:"organization_id" validate:"required"`
+	OrganizationID uuid.UUID `json:"organization_id" validate:"required" format:"uuid"`
 }
 
 type UpdateUserProfileRequest struct {
@@ -101,7 +92,7 @@ type UserRoles struct {
 
 // LoginWithPasswordRequest enables callers to authenticate with email and password.
 type LoginWithPasswordRequest struct {
-	Email    string `json:"email" validate:"required,email"`
+	Email    string `json:"email" validate:"required,email" format:"email"`
 	Password string `json:"password" validate:"required"`
 }
 
@@ -114,11 +105,21 @@ type CreateOrganizationRequest struct {
 	Name string `json:"name" validate:"required,username"`
 }
 
-// AuthMethods contains whether authentication types are enabled or not.
+// AuthMethods contains authentication method information like whether they are enabled or not or custom text, etc.
 type AuthMethods struct {
-	Password bool `json:"password"`
-	Github   bool `json:"github"`
-	OIDC     bool `json:"oidc"`
+	Password AuthMethod     `json:"password"`
+	Github   AuthMethod     `json:"github"`
+	OIDC     OIDCAuthMethod `json:"oidc"`
+}
+
+type AuthMethod struct {
+	Enabled bool `json:"enabled"`
+}
+
+type OIDCAuthMethod struct {
+	AuthMethod
+	SignInText string `json:"signInText"`
+	IconURL    string `json:"iconUrl"`
 }
 
 // HasFirstUser returns whether the first user has been created.
@@ -132,7 +133,7 @@ func (c *Client) HasFirstUser(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	if res.StatusCode != http.StatusOK {
-		return false, readBodyAsError(res)
+		return false, ReadBodyAsError(res)
 	}
 	return true, nil
 }
@@ -146,7 +147,7 @@ func (c *Client) CreateFirstUser(ctx context.Context, req CreateFirstUserRequest
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusCreated {
-		return CreateFirstUserResponse{}, readBodyAsError(res)
+		return CreateFirstUserResponse{}, ReadBodyAsError(res)
 	}
 	var resp CreateFirstUserResponse
 	return resp, json.NewDecoder(res.Body).Decode(&resp)
@@ -160,7 +161,7 @@ func (c *Client) CreateUser(ctx context.Context, req CreateUserRequest) (User, e
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusCreated {
-		return User{}, readBodyAsError(res)
+		return User{}, ReadBodyAsError(res)
 	}
 	var user User
 	return user, json.NewDecoder(res.Body).Decode(&user)
@@ -174,7 +175,7 @@ func (c *Client) DeleteUser(ctx context.Context, id uuid.UUID) error {
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return readBodyAsError(res)
+		return ReadBodyAsError(res)
 	}
 	return nil
 }
@@ -187,7 +188,7 @@ func (c *Client) UpdateUserProfile(ctx context.Context, user string, req UpdateU
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return User{}, readBodyAsError(res)
+		return User{}, ReadBodyAsError(res)
 	}
 	var resp User
 	return resp, json.NewDecoder(res.Body).Decode(&resp)
@@ -211,7 +212,7 @@ func (c *Client) UpdateUserStatus(ctx context.Context, user string, status UserS
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return User{}, readBodyAsError(res)
+		return User{}, ReadBodyAsError(res)
 	}
 
 	var resp User
@@ -227,7 +228,7 @@ func (c *Client) UpdateUserPassword(ctx context.Context, user string, req Update
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusNoContent {
-		return readBodyAsError(res)
+		return ReadBodyAsError(res)
 	}
 	return nil
 }
@@ -241,7 +242,7 @@ func (c *Client) UpdateUserRoles(ctx context.Context, user string, req UpdateRol
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return User{}, readBodyAsError(res)
+		return User{}, ReadBodyAsError(res)
 	}
 	var resp User
 	return resp, json.NewDecoder(res.Body).Decode(&resp)
@@ -256,21 +257,21 @@ func (c *Client) UpdateOrganizationMemberRoles(ctx context.Context, organization
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return OrganizationMember{}, readBodyAsError(res)
+		return OrganizationMember{}, ReadBodyAsError(res)
 	}
 	var member OrganizationMember
 	return member, json.NewDecoder(res.Body).Decode(&member)
 }
 
-// GetUserRoles returns all roles the user has
-func (c *Client) GetUserRoles(ctx context.Context, user string) (UserRoles, error) {
+// UserRoles returns all roles the user has
+func (c *Client) UserRoles(ctx context.Context, user string) (UserRoles, error) {
 	res, err := c.Request(ctx, http.MethodGet, fmt.Sprintf("/api/v2/users/%s/roles", user), nil)
 	if err != nil {
 		return UserRoles{}, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return UserRoles{}, readBodyAsError(res)
+		return UserRoles{}, ReadBodyAsError(res)
 	}
 	var roles UserRoles
 	return roles, json.NewDecoder(res.Body).Decode(&roles)
@@ -285,7 +286,7 @@ func (c *Client) LoginWithPassword(ctx context.Context, req LoginWithPasswordReq
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusCreated {
-		return LoginWithPasswordResponse{}, readBodyAsError(res)
+		return LoginWithPasswordResponse{}, ReadBodyAsError(res)
 	}
 	var resp LoginWithPasswordResponse
 	err = json.NewDecoder(res.Body).Decode(&resp)
@@ -316,7 +317,7 @@ func (c *Client) User(ctx context.Context, userIdent string) (User, error) {
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return User{}, readBodyAsError(res)
+		return User{}, ReadBodyAsError(res)
 	}
 	var user User
 	return user, json.NewDecoder(res.Body).Decode(&user)
@@ -324,7 +325,7 @@ func (c *Client) User(ctx context.Context, userIdent string) (User, error) {
 
 // Users returns all users according to the request parameters. If no parameters are set,
 // the default behavior is to return all users in a single page.
-func (c *Client) Users(ctx context.Context, req UsersRequest) ([]User, error) {
+func (c *Client) Users(ctx context.Context, req UsersRequest) (GetUsersResponse, error) {
 	res, err := c.Request(ctx, http.MethodGet, "/api/v2/users", nil,
 		req.Pagination.asRequestOption(),
 		func(r *http.Request) {
@@ -347,50 +348,16 @@ func (c *Client) Users(ctx context.Context, req UsersRequest) ([]User, error) {
 		},
 	)
 	if err != nil {
-		return []User{}, err
+		return GetUsersResponse{}, err
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return []User{}, readBodyAsError(res)
+		return GetUsersResponse{}, ReadBodyAsError(res)
 	}
 
-	var users []User
-	return users, json.NewDecoder(res.Body).Decode(&users)
-}
-
-func (c *Client) UserCount(ctx context.Context, req UserCountRequest) (UserCountResponse, error) {
-	res, err := c.Request(ctx, http.MethodGet, "/api/v2/users/count", nil,
-		func(r *http.Request) {
-			q := r.URL.Query()
-			var params []string
-			if req.Search != "" {
-				params = append(params, req.Search)
-			}
-			if req.Status != "" {
-				params = append(params, "status:"+string(req.Status))
-			}
-			if req.Role != "" {
-				params = append(params, "role:"+req.Role)
-			}
-			if req.SearchQuery != "" {
-				params = append(params, req.SearchQuery)
-			}
-			q.Set("q", strings.Join(params, " "))
-			r.URL.RawQuery = q.Encode()
-		},
-	)
-	if err != nil {
-		return UserCountResponse{}, err
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode != http.StatusOK {
-		return UserCountResponse{}, readBodyAsError(res)
-	}
-
-	var count UserCountResponse
-	return count, json.NewDecoder(res.Body).Decode(&count)
+	var usersRes GetUsersResponse
+	return usersRes, json.NewDecoder(res.Body).Decode(&usersRes)
 }
 
 // OrganizationsByUser returns all organizations the user is a member of.
@@ -401,7 +368,7 @@ func (c *Client) OrganizationsByUser(ctx context.Context, user string) ([]Organi
 	}
 	defer res.Body.Close()
 	if res.StatusCode > http.StatusOK {
-		return nil, readBodyAsError(res)
+		return nil, ReadBodyAsError(res)
 	}
 	var orgs []Organization
 	return orgs, json.NewDecoder(res.Body).Decode(&orgs)
@@ -414,7 +381,7 @@ func (c *Client) OrganizationByName(ctx context.Context, user string, name strin
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return Organization{}, readBodyAsError(res)
+		return Organization{}, ReadBodyAsError(res)
 	}
 	var org Organization
 	return org, json.NewDecoder(res.Body).Decode(&org)
@@ -429,7 +396,7 @@ func (c *Client) CreateOrganization(ctx context.Context, req CreateOrganizationR
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusCreated {
-		return Organization{}, readBodyAsError(res)
+		return Organization{}, ReadBodyAsError(res)
 	}
 
 	var org Organization
@@ -445,7 +412,7 @@ func (c *Client) AuthMethods(ctx context.Context) (AuthMethods, error) {
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return AuthMethods{}, readBodyAsError(res)
+		return AuthMethods{}, ReadBodyAsError(res)
 	}
 
 	var userAuth AuthMethods

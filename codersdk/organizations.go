@@ -26,24 +26,41 @@ const (
 
 // Organization is the JSON representation of a Coder organization.
 type Organization struct {
-	ID        uuid.UUID `json:"id" validate:"required"`
+	ID        uuid.UUID `json:"id" validate:"required" format:"uuid"`
 	Name      string    `json:"name" validate:"required"`
-	CreatedAt time.Time `json:"created_at" validate:"required"`
-	UpdatedAt time.Time `json:"updated_at" validate:"required"`
+	CreatedAt time.Time `json:"created_at" validate:"required" format:"date-time"`
+	UpdatedAt time.Time `json:"updated_at" validate:"required" format:"date-time"`
+}
+
+type OrganizationMember struct {
+	UserID         uuid.UUID `db:"user_id" json:"user_id" format:"uuid"`
+	OrganizationID uuid.UUID `db:"organization_id" json:"organization_id" format:"uuid"`
+	CreatedAt      time.Time `db:"created_at" json:"created_at" format:"date-time"`
+	UpdatedAt      time.Time `db:"updated_at" json:"updated_at" format:"date-time"`
+	Roles          []Role    `db:"roles" json:"roles"`
 }
 
 // CreateTemplateVersionRequest enables callers to create a new Template Version.
 type CreateTemplateVersionRequest struct {
 	Name string `json:"name,omitempty" validate:"omitempty,template_name"`
 	// TemplateID optionally associates a version with a template.
-	TemplateID uuid.UUID `json:"template_id,omitempty"`
+	TemplateID      uuid.UUID                `json:"template_id,omitempty" format:"uuid"`
+	StorageMethod   ProvisionerStorageMethod `json:"storage_method" validate:"oneof=file,required" enums:"file"`
+	FileID          uuid.UUID                `json:"file_id,omitempty" validate:"required_without=ExampleID" format:"uuid"`
+	ExampleID       string                   `json:"example_id,omitempty" validate:"required_without=FileID"`
+	Provisioner     ProvisionerType          `json:"provisioner" validate:"oneof=terraform echo,required"`
+	ProvisionerTags map[string]string        `json:"tags"`
 
-	StorageMethod ProvisionerStorageMethod `json:"storage_method" validate:"oneof=file,required"`
-	FileID        uuid.UUID                `json:"file_id" validate:"required"`
-	Provisioner   ProvisionerType          `json:"provisioner" validate:"oneof=terraform echo,required"`
 	// ParameterValues allows for additional parameters to be provided
 	// during the dry-run provision stage.
 	ParameterValues []CreateParameterRequest `json:"parameter_values,omitempty"`
+
+	UserVariableValues []VariableValue `json:"user_variable_values,omitempty"`
+}
+
+type VariableValue struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // CreateTemplateRequest provides options when creating a template.
@@ -65,23 +82,28 @@ type CreateTemplateRequest struct {
 	// This is required on creation to enable a user-flow of validating a
 	// template works. There is no reason the data-model cannot support empty
 	// templates, but it doesn't make sense for users.
-	VersionID       uuid.UUID                `json:"template_version_id" validate:"required"`
+	VersionID       uuid.UUID                `json:"template_version_id" validate:"required" format:"uuid"`
 	ParameterValues []CreateParameterRequest `json:"parameter_values,omitempty"`
 
 	// DefaultTTLMillis allows optionally specifying the default TTL
 	// for all workspaces created from this template.
 	DefaultTTLMillis *int64 `json:"default_ttl_ms,omitempty"`
+
+	// Allow users to cancel in-progress workspace jobs.
+	// *bool as the default value is "true".
+	AllowUserCancelWorkspaceJobs *bool `json:"allow_user_cancel_workspace_jobs"`
 }
 
 // CreateWorkspaceRequest provides options for creating a new workspace.
 type CreateWorkspaceRequest struct {
-	TemplateID        uuid.UUID `json:"template_id" validate:"required"`
+	TemplateID        uuid.UUID `json:"template_id" validate:"required" format:"uuid"`
 	Name              string    `json:"name" validate:"workspace_name,required"`
 	AutostartSchedule *string   `json:"autostart_schedule"`
 	TTLMillis         *int64    `json:"ttl_ms,omitempty"`
 	// ParameterValues allows for additional parameters to be provided
 	// during the initial provision.
-	ParameterValues []CreateParameterRequest `json:"parameter_values,omitempty"`
+	ParameterValues     []CreateParameterRequest  `json:"parameter_values,omitempty"`
+	RichParameterValues []WorkspaceBuildParameter `json:"rich_parameter_values,omitempty"`
 }
 
 func (c *Client) Organization(ctx context.Context, id uuid.UUID) (Organization, error) {
@@ -92,7 +114,7 @@ func (c *Client) Organization(ctx context.Context, id uuid.UUID) (Organization, 
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return Organization{}, readBodyAsError(res)
+		return Organization{}, ReadBodyAsError(res)
 	}
 
 	var organization Organization
@@ -111,7 +133,7 @@ func (c *Client) ProvisionerDaemons(ctx context.Context) ([]ProvisionerDaemon, e
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return nil, readBodyAsError(res)
+		return nil, ReadBodyAsError(res)
 	}
 
 	var daemons []ProvisionerDaemon
@@ -131,7 +153,26 @@ func (c *Client) CreateTemplateVersion(ctx context.Context, organizationID uuid.
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusCreated {
-		return TemplateVersion{}, readBodyAsError(res)
+		return TemplateVersion{}, ReadBodyAsError(res)
+	}
+
+	var templateVersion TemplateVersion
+	return templateVersion, json.NewDecoder(res.Body).Decode(&templateVersion)
+}
+
+func (c *Client) TemplateVersionByOrganizationAndName(ctx context.Context, organizationID uuid.UUID, templateName, versionName string) (TemplateVersion, error) {
+	res, err := c.Request(ctx, http.MethodGet,
+		fmt.Sprintf("/api/v2/organizations/%s/templates/%s/versions/%s", organizationID.String(), templateName, versionName),
+		nil,
+	)
+
+	if err != nil {
+		return TemplateVersion{}, xerrors.Errorf("execute request: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		return TemplateVersion{}, ReadBodyAsError(res)
 	}
 
 	var templateVersion TemplateVersion
@@ -150,7 +191,7 @@ func (c *Client) CreateTemplate(ctx context.Context, organizationID uuid.UUID, r
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusCreated {
-		return Template{}, readBodyAsError(res)
+		return Template{}, ReadBodyAsError(res)
 	}
 
 	var template Template
@@ -169,7 +210,7 @@ func (c *Client) TemplatesByOrganization(ctx context.Context, organizationID uui
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return nil, readBodyAsError(res)
+		return nil, ReadBodyAsError(res)
 	}
 
 	var templates []Template
@@ -188,7 +229,7 @@ func (c *Client) TemplateByName(ctx context.Context, organizationID uuid.UUID, n
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return Template{}, readBodyAsError(res)
+		return Template{}, ReadBodyAsError(res)
 	}
 
 	var template Template
@@ -204,7 +245,7 @@ func (c *Client) CreateWorkspace(ctx context.Context, organizationID uuid.UUID, 
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusCreated {
-		return Workspace{}, readBodyAsError(res)
+		return Workspace{}, ReadBodyAsError(res)
 	}
 
 	var workspace Workspace

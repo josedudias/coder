@@ -25,6 +25,17 @@ import (
 )
 
 // Creates a new token API key that effectively doesn't expire.
+//
+// @Summary Create token API key
+// @ID create-token-api-key
+// @Security CoderSessionToken
+// @Accept json
+// @Produce json
+// @Tags Users
+// @Param user path string true "User ID, name, or me"
+// @Param request body codersdk.CreateTokenRequest true "Create token request"
+// @Success 201 {object} codersdk.GenerateAPIKeyResponse
+// @Router /users/{user}/keys/tokens [post]
 func (api *API) postToken(rw http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := httpmw.UserParam(r)
@@ -44,9 +55,22 @@ func (api *API) postToken(rw http.ResponseWriter, r *http.Request) {
 		scope = database.APIKeyScope(createToken.Scope)
 	}
 
-	// tokens last 100 years
-	lifeTime := time.Hour * 876000
-	cookie, err := api.createAPIKey(ctx, createAPIKeyParams{
+	// default lifetime is 30 days
+	lifeTime := 30 * 24 * time.Hour
+	if createToken.Lifetime != 0 {
+		lifeTime = createToken.Lifetime
+	}
+
+	err := api.validateAPIKeyLifetime(lifeTime)
+	if err != nil {
+		httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
+			Message: "Failed to validate create API key request.",
+			Detail:  err.Error(),
+		})
+		return
+	}
+
+	cookie, _, err := api.createAPIKey(ctx, createAPIKeyParams{
 		UserID:          user.ID,
 		LoginType:       database.LoginTypeToken,
 		ExpiresAt:       database.Now().Add(lifeTime),
@@ -65,7 +89,15 @@ func (api *API) postToken(rw http.ResponseWriter, r *http.Request) {
 }
 
 // Creates a new session key, used for logging in via the CLI.
-// DEPRECATED: use postToken instead.
+//
+// @Summary Create new session key
+// @ID create-new-session-key
+// @Security CoderSessionToken
+// @Produce json
+// @Tags Users
+// @Param user path string true "User ID, name, or me"
+// @Success 201 {object} codersdk.GenerateAPIKeyResponse
+// @Router /users/{user}/keys [post]
 func (api *API) postAPIKey(rw http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := httpmw.UserParam(r)
@@ -76,7 +108,7 @@ func (api *API) postAPIKey(rw http.ResponseWriter, r *http.Request) {
 	}
 
 	lifeTime := time.Hour * 24 * 7
-	cookie, err := api.createAPIKey(ctx, createAPIKeyParams{
+	cookie, _, err := api.createAPIKey(ctx, createAPIKeyParams{
 		UserID:     user.ID,
 		LoginType:  database.LoginTypePassword,
 		RemoteAddr: r.RemoteAddr,
@@ -94,22 +126,25 @@ func (api *API) postAPIKey(rw http.ResponseWriter, r *http.Request) {
 	}
 
 	// We intentionally do not set the cookie on the response here.
-	// Setting the cookie will couple the browser sesion to the API
+	// Setting the cookie will couple the browser session to the API
 	// key we return here, meaning logging out of the website would
 	// invalid your CLI key.
 	httpapi.Write(ctx, rw, http.StatusCreated, codersdk.GenerateAPIKeyResponse{Key: cookie.Value})
 }
 
+// @Summary Get API key
+// @ID get-api-key
+// @Security CoderSessionToken
+// @Produce json
+// @Tags Users
+// @Param user path string true "User ID, name, or me"
+// @Param keyid path string true "Key ID" format(uuid)
+// @Success 200 {object} codersdk.APIKey
+// @Router /users/{user}/keys/{keyid} [get]
 func (api *API) apiKey(rw http.ResponseWriter, r *http.Request) {
 	var (
-		ctx  = r.Context()
-		user = httpmw.UserParam(r)
+		ctx = r.Context()
 	)
-
-	if !api.Authorize(r, rbac.ActionRead, rbac.ResourceAPIKey.WithOwner(user.ID.String())) {
-		httpapi.ResourceNotFound(rw)
-		return
-	}
 
 	keyID := chi.URLParam(r, "keyid")
 	key, err := api.Database.GetAPIKeyByID(ctx, keyID)
@@ -125,28 +160,40 @@ func (api *API) apiKey(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpapi.Write(ctx, rw, http.StatusOK, convertAPIKey(key))
-}
-
-func (api *API) tokens(rw http.ResponseWriter, r *http.Request) {
-	var (
-		ctx  = r.Context()
-		user = httpmw.UserParam(r)
-	)
-
-	if !api.Authorize(r, rbac.ActionRead, rbac.ResourceAPIKey.WithOwner(user.ID.String())) {
+	if !api.Authorize(r, rbac.ActionRead, key) {
 		httpapi.ResourceNotFound(rw)
 		return
 	}
 
+	httpapi.Write(ctx, rw, http.StatusOK, convertAPIKey(key))
+}
+
+// @Summary Get user tokens
+// @ID get-user-tokens
+// @Security CoderSessionToken
+// @Produce json
+// @Tags Users
+// @Param user path string true "User ID, name, or me"
+// @Success 200 {array} codersdk.APIKey
+// @Router /users/{user}/keys/tokens [get]
+func (api *API) tokens(rw http.ResponseWriter, r *http.Request) {
+	var (
+		ctx = r.Context()
+	)
+
 	keys, err := api.Database.GetAPIKeysByLoginType(ctx, database.LoginTypeToken)
-	if errors.Is(err, sql.ErrNoRows) {
-		httpapi.Write(ctx, rw, http.StatusOK, []codersdk.APIKey{})
-		return
-	}
 	if err != nil {
 		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
 			Message: "Internal error fetching API keys.",
+			Detail:  err.Error(),
+		})
+		return
+	}
+
+	keys, err = AuthorizeFilter(api.HTTPAuth, r, rbac.ActionRead, keys)
+	if err != nil {
+		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
+			Message: "Internal error fetching keys.",
 			Detail:  err.Error(),
 		})
 		return
@@ -160,18 +207,26 @@ func (api *API) tokens(rw http.ResponseWriter, r *http.Request) {
 	httpapi.Write(ctx, rw, http.StatusOK, apiKeys)
 }
 
+// @Summary Delete API key
+// @ID delete-api-key
+// @Security CoderSessionToken
+// @Tags Users
+// @Param user path string true "User ID, name, or me"
+// @Param keyid path string true "Key ID" format(uuid)
+// @Success 204
+// @Router /users/{user}/keys/{keyid} [delete]
 func (api *API) deleteAPIKey(rw http.ResponseWriter, r *http.Request) {
 	var (
-		ctx  = r.Context()
-		user = httpmw.UserParam(r)
+		ctx   = r.Context()
+		user  = httpmw.UserParam(r)
+		keyID = chi.URLParam(r, "keyid")
 	)
 
-	if !api.Authorize(r, rbac.ActionDelete, rbac.ResourceAPIKey.WithOwner(user.ID.String())) {
+	if !api.Authorize(r, rbac.ActionDelete, rbac.ResourceAPIKey.WithIDString(keyID).WithOwner(user.ID.String())) {
 		httpapi.ResourceNotFound(rw)
 		return
 	}
 
-	keyID := chi.URLParam(r, "keyid")
 	err := api.Database.DeleteAPIKeyByID(ctx, keyID)
 	if errors.Is(err, sql.ErrNoRows) {
 		httpapi.ResourceNotFound(rw)
@@ -189,7 +244,7 @@ func (api *API) deleteAPIKey(rw http.ResponseWriter, r *http.Request) {
 }
 
 // Generates a new ID and secret for an API key.
-func generateAPIKeyIDSecret() (id string, secret string, err error) {
+func GenerateAPIKeyIDSecret() (id string, secret string, err error) {
 	// Length of an API Key ID.
 	id, err = cryptorand.String(10)
 	if err != nil {
@@ -214,20 +269,37 @@ type createAPIKeyParams struct {
 	Scope           database.APIKeyScope
 }
 
-func (api *API) createAPIKey(ctx context.Context, params createAPIKeyParams) (*http.Cookie, error) {
-	keyID, keySecret, err := generateAPIKeyIDSecret()
+func (api *API) validateAPIKeyLifetime(lifetime time.Duration) error {
+	if lifetime <= 0 {
+		return xerrors.New("lifetime must be positive number greater than 0")
+	}
+
+	if lifetime > api.DeploymentConfig.MaxTokenLifetime.Value {
+		return xerrors.Errorf("lifetime must be less than %s", api.DeploymentConfig.MaxTokenLifetime.Value)
+	}
+
+	return nil
+}
+
+func (api *API) createAPIKey(ctx context.Context, params createAPIKeyParams) (*http.Cookie, *database.APIKey, error) {
+	keyID, keySecret, err := GenerateAPIKeyIDSecret()
 	if err != nil {
-		return nil, xerrors.Errorf("generate API key: %w", err)
+		return nil, nil, xerrors.Errorf("generate API key: %w", err)
 	}
 	hashed := sha256.Sum256([]byte(keySecret))
 
-	// Default expires at to now+lifetime, or just 24hrs if not set
+	// Default expires at to now+lifetime, or use the configured value if not
+	// set.
 	if params.ExpiresAt.IsZero() {
 		if params.LifetimeSeconds != 0 {
 			params.ExpiresAt = database.Now().Add(time.Duration(params.LifetimeSeconds) * time.Second)
 		} else {
-			params.ExpiresAt = database.Now().Add(24 * time.Hour)
+			params.ExpiresAt = database.Now().Add(api.DeploymentConfig.SessionDuration.Value)
+			params.LifetimeSeconds = int64(api.DeploymentConfig.SessionDuration.Value.Seconds())
 		}
+	}
+	if params.LifetimeSeconds == 0 {
+		params.LifetimeSeconds = int64(time.Until(params.ExpiresAt).Seconds())
 	}
 
 	ip := net.ParseIP(params.RemoteAddr)
@@ -243,7 +315,7 @@ func (api *API) createAPIKey(ctx context.Context, params createAPIKeyParams) (*h
 	switch scope {
 	case database.APIKeyScopeAll, database.APIKeyScopeApplicationConnect:
 	default:
-		return nil, xerrors.Errorf("invalid API key scope: %q", scope)
+		return nil, nil, xerrors.Errorf("invalid API key scope: %q", scope)
 	}
 
 	key, err := api.Database.InsertAPIKey(ctx, database.InsertAPIKeyParams{
@@ -266,7 +338,7 @@ func (api *API) createAPIKey(ctx context.Context, params createAPIKeyParams) (*h
 		Scope:        scope,
 	})
 	if err != nil {
-		return nil, xerrors.Errorf("insert API key: %w", err)
+		return nil, nil, xerrors.Errorf("insert API key: %w", err)
 	}
 
 	api.Telemetry.Report(&telemetry.Snapshot{
@@ -276,11 +348,11 @@ func (api *API) createAPIKey(ctx context.Context, params createAPIKeyParams) (*h
 	// This format is consumed by the APIKey middleware.
 	sessionToken := fmt.Sprintf("%s-%s", keyID, keySecret)
 	return &http.Cookie{
-		Name:     codersdk.SessionTokenKey,
+		Name:     codersdk.SessionTokenCookie,
 		Value:    sessionToken,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		Secure:   api.SecureAuthCookie,
-	}, nil
+	}, &key, nil
 }

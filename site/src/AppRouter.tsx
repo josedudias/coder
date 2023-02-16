@@ -1,7 +1,4 @@
-import { useSelector } from "@xstate/react"
-import { FeatureNames } from "api/types"
 import { FullScreenLoader } from "components/Loader/FullScreenLoader"
-import { RequirePermission } from "components/RequirePermission/RequirePermission"
 import { TemplateLayout } from "components/TemplateLayout/TemplateLayout"
 import { UsersLayout } from "components/UsersLayout/UsersLayout"
 import IndexPage from "pages"
@@ -10,15 +7,13 @@ import GroupsPage from "pages/GroupsPage/GroupsPage"
 import LoginPage from "pages/LoginPage/LoginPage"
 import { SetupPage } from "pages/SetupPage/SetupPage"
 import { TemplateSettingsPage } from "pages/TemplateSettingsPage/TemplateSettingsPage"
+import { WorkspaceBuildParametersPage } from "pages/WorkspaceBuildParametersPage/WorkspaceBuildParametersPage"
 import TemplatesPage from "pages/TemplatesPage/TemplatesPage"
 import UsersPage from "pages/UsersPage/UsersPage"
 import WorkspacesPage from "pages/WorkspacesPage/WorkspacesPage"
-import { FC, lazy, Suspense, useContext } from "react"
-import { Route, Routes } from "react-router-dom"
-import { selectPermissions } from "xServices/auth/authSelectors"
-import { selectFeatureVisibility } from "xServices/entitlements/entitlementsSelectors"
-import { XServiceContext } from "xServices/StateContext"
-import { AuthAndFrame } from "./components/AuthAndFrame/AuthAndFrame"
+import { FC, lazy, Suspense } from "react"
+import { Route, Routes, BrowserRouter as Router } from "react-router-dom"
+import { DashboardLayout } from "./components/Dashboard/DashboardLayout"
 import { RequireAuth } from "./components/RequireAuth/RequireAuth"
 import { SettingsLayout } from "./components/SettingsLayout/SettingsLayout"
 import { DeploySettingsLayout } from "components/DeploySettingsLayout/DeploySettingsLayout"
@@ -39,6 +34,9 @@ const SecurityPage = lazy(
 const SSHKeysPage = lazy(
   () => import("./pages/UserSettingsPage/SSHKeysPage/SSHKeysPage"),
 )
+const TokensPage = lazy(
+  () => import("./pages/UserSettingsPage/TokensPage/TokensPage"),
+)
 const CreateUserPage = lazy(
   () => import("./pages/UsersPage/CreateUserPage/CreateUserPage"),
 )
@@ -46,6 +44,9 @@ const WorkspaceBuildPage = lazy(
   () => import("./pages/WorkspaceBuildPage/WorkspaceBuildPage"),
 )
 const WorkspacePage = lazy(() => import("./pages/WorkspacePage/WorkspacePage"))
+const WorkspaceChangeVersionPage = lazy(
+  () => import("./pages/WorkspaceChangeVersionPage/WorkspaceChangeVersionPage"),
+)
 const WorkspaceSchedulePage = lazy(
   () => import("./pages/WorkspaceSchedulePage/WorkspaceSchedulePage"),
 )
@@ -68,321 +69,185 @@ const SettingsGroupPage = lazy(
   () => import("./pages/GroupsPage/SettingsGroupPage"),
 )
 const GeneralSettingsPage = lazy(
-  () => import("./pages/DeploySettingsPage/GeneralSettingsPage"),
+  () =>
+    import(
+      "./pages/DeploySettingsPage/GeneralSettingsPage/GeneralSettingsPage"
+    ),
 )
 const SecuritySettingsPage = lazy(
-  () => import("./pages/DeploySettingsPage/SecuritySettingsPage"),
+  () =>
+    import(
+      "./pages/DeploySettingsPage/SecuritySettingsPage/SecuritySettingsPage"
+    ),
+)
+const AppearanceSettingsPage = lazy(
+  () =>
+    import(
+      "./pages/DeploySettingsPage/AppearanceSettingsPage/AppearanceSettingsPage"
+    ),
 )
 const UserAuthSettingsPage = lazy(
-  () => import("./pages/DeploySettingsPage/UserAuthSettingsPage"),
+  () =>
+    import(
+      "./pages/DeploySettingsPage/UserAuthSettingsPage/UserAuthSettingsPage"
+    ),
 )
 const GitAuthSettingsPage = lazy(
-  () => import("./pages/DeploySettingsPage/GitAuthSettingsPage"),
+  () =>
+    import(
+      "./pages/DeploySettingsPage/GitAuthSettingsPage/GitAuthSettingsPage"
+    ),
 )
 const NetworkSettingsPage = lazy(
-  () => import("./pages/DeploySettingsPage/NetworkSettingsPage"),
+  () =>
+    import(
+      "./pages/DeploySettingsPage/NetworkSettingsPage/NetworkSettingsPage"
+    ),
 )
 const GitAuthPage = lazy(() => import("./pages/GitAuthPage/GitAuthPage"))
+const TemplateVersionPage = lazy(
+  () => import("./pages/TemplateVersionPage/TemplateVersionPage"),
+)
+const TemplateVersionEditorPage = lazy(
+  () =>
+    import(
+      "./pages/TemplateVersionPage/TemplateVersionEditorPage/TemplateVersionEditorPage"
+    ),
+)
+const StarterTemplatesPage = lazy(
+  () => import("./pages/StarterTemplatesPage/StarterTemplatesPage"),
+)
+const StarterTemplatePage = lazy(
+  () => import("pages/StarterTemplatePage/StarterTemplatePage"),
+)
+const CreateTemplatePage = lazy(
+  () => import("./pages/CreateTemplatePage/CreateTemplatePage"),
+)
 
 export const AppRouter: FC = () => {
-  const xServices = useContext(XServiceContext)
-  const permissions = useSelector(xServices.authXService, selectPermissions)
-  const featureVisibility = useSelector(
-    xServices.entitlementsXService,
-    selectFeatureVisibility,
-  )
-
   return (
     <Suspense fallback={<FullScreenLoader />}>
-      <Routes>
-        <Route
-          index
-          element={
-            <RequireAuth>
-              <IndexPage />
-            </RequireAuth>
-          }
-        />
+      <Router>
+        <Routes>
+          <Route path="login" element={<LoginPage />} />
+          <Route path="setup" element={<SetupPage />} />
 
-        <Route path="login" element={<LoginPage />} />
-        <Route path="setup" element={<SetupPage />} />
-        <Route
-          path="cli-auth"
-          element={
-            <RequireAuth>
-              <CliAuthenticationPage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="gitauth"
-          element={
-            <RequireAuth>
-              <GitAuthPage />
-            </RequireAuth>
-          }
-        />
+          {/* Dashboard routes */}
+          <Route element={<RequireAuth />}>
+            <Route element={<DashboardLayout />}>
+              <Route index element={<IndexPage />} />
 
-        <Route path="workspaces">
-          <Route
-            index
-            element={
-              <AuthAndFrame>
-                <WorkspacesPage />
-              </AuthAndFrame>
-            }
-          />
-        </Route>
+              <Route path="gitauth" element={<GitAuthPage />} />
 
-        <Route path="templates">
-          <Route
-            index
-            element={
-              <AuthAndFrame>
-                <TemplatesPage />
-              </AuthAndFrame>
-            }
-          />
+              <Route path="workspaces" element={<WorkspacesPage />} />
 
-          <Route path=":template">
+              <Route path="starter-templates">
+                <Route index element={<StarterTemplatesPage />} />
+                <Route path=":exampleId" element={<StarterTemplatePage />} />
+              </Route>
+
+              <Route path="templates">
+                <Route index element={<TemplatesPage />} />
+                <Route path="new" element={<CreateTemplatePage />} />
+                <Route path=":template">
+                  <Route element={<TemplateLayout />}>
+                    <Route index element={<TemplateSummaryPage />} />
+                    <Route
+                      path="permissions"
+                      element={<TemplatePermissionsPage />}
+                    />
+                  </Route>
+
+                  <Route path="workspace" element={<CreateWorkspacePage />} />
+                  <Route path="settings" element={<TemplateSettingsPage />} />
+                  <Route path="versions">
+                    <Route path=":version">
+                      <Route index element={<TemplateVersionPage />} />
+                      <Route
+                        path="edit"
+                        element={<TemplateVersionEditorPage />}
+                      />
+                    </Route>
+                  </Route>
+                </Route>
+              </Route>
+
+              <Route path="users">
+                <Route element={<UsersLayout />}>
+                  <Route index element={<UsersPage />} />
+                </Route>
+
+                <Route path="create" element={<CreateUserPage />} />
+              </Route>
+
+              <Route path="/groups">
+                <Route element={<UsersLayout />}>
+                  <Route index element={<GroupsPage />} />
+                </Route>
+
+                <Route path="create" element={<CreateGroupPage />} />
+                <Route path=":groupId" element={<GroupPage />} />
+                <Route
+                  path=":groupId/settings"
+                  element={<SettingsGroupPage />}
+                />
+              </Route>
+
+              <Route path="/audit" element={<AuditPage />} />
+
+              <Route
+                path="/settings/deployment"
+                element={<DeploySettingsLayout />}
+              >
+                <Route path="general" element={<GeneralSettingsPage />} />
+                <Route path="security" element={<SecuritySettingsPage />} />
+                <Route path="appearance" element={<AppearanceSettingsPage />} />
+                <Route path="network" element={<NetworkSettingsPage />} />
+                <Route path="userauth" element={<UserAuthSettingsPage />} />
+                <Route path="gitauth" element={<GitAuthSettingsPage />} />
+              </Route>
+
+              <Route path="settings" element={<SettingsLayout />}>
+                <Route path="account" element={<AccountPage />} />
+                <Route path="security" element={<SecurityPage />} />
+                <Route path="ssh-keys" element={<SSHKeysPage />} />
+                <Route path="tokens" element={<TokensPage />} />
+              </Route>
+
+              <Route path="/@:username">
+                <Route path=":workspace">
+                  <Route index element={<WorkspacePage />} />
+                  <Route path="schedule" element={<WorkspaceSchedulePage />} />
+                  <Route
+                    path="builds/:buildNumber"
+                    element={<WorkspaceBuildPage />}
+                  />
+                  <Route
+                    path="change-version"
+                    element={<WorkspaceChangeVersionPage />}
+                  />
+                  <Route
+                    path="build-parameters"
+                    element={<WorkspaceBuildParametersPage />}
+                  />
+                </Route>
+              </Route>
+            </Route>
+
+            {/* Terminal and CLI auth pages don't have the dashboard layout */}
             <Route
-              index
-              element={
-                <AuthAndFrame>
-                  <TemplateLayout>
-                    <TemplateSummaryPage />
-                  </TemplateLayout>
-                </AuthAndFrame>
-              }
+              path="/@:username/:workspace/terminal"
+              element={<TerminalPage />}
             />
-            <Route
-              path="permissions"
-              element={
-                <AuthAndFrame>
-                  <TemplateLayout>
-                    <TemplatePermissionsPage />
-                  </TemplateLayout>
-                </AuthAndFrame>
-              }
-            />
-            <Route
-              path="workspace"
-              element={
-                <RequireAuth>
-                  <CreateWorkspacePage />
-                </RequireAuth>
-              }
-            />
-            <Route
-              path="settings"
-              element={
-                <RequireAuth>
-                  <TemplateSettingsPage />
-                </RequireAuth>
-              }
-            />
+            <Route path="cli-auth" element={<CliAuthenticationPage />} />
           </Route>
-        </Route>
 
-        <Route path="users">
-          <Route
-            index
-            element={
-              <AuthAndFrame>
-                <UsersLayout>
-                  <UsersPage />
-                </UsersLayout>
-              </AuthAndFrame>
-            }
-          />
-          <Route
-            path="create"
-            element={
-              <RequireAuth>
-                <CreateUserPage />
-              </RequireAuth>
-            }
-          />
-        </Route>
-
-        <Route path="/groups">
-          <Route
-            index
-            element={
-              <AuthAndFrame>
-                <UsersLayout>
-                  <GroupsPage />
-                </UsersLayout>
-              </AuthAndFrame>
-            }
-          />
-          <Route
-            path="create"
-            element={
-              <RequireAuth>
-                <CreateGroupPage />
-              </RequireAuth>
-            }
-          />
-          <Route
-            path=":groupId"
-            element={
-              <AuthAndFrame>
-                <GroupPage />
-              </AuthAndFrame>
-            }
-          />
-          <Route
-            path=":groupId/settings"
-            element={
-              <RequireAuth>
-                <SettingsGroupPage />
-              </RequireAuth>
-            }
-          />
-        </Route>
-
-        <Route path="/audit">
-          <Route
-            index
-            element={
-              <AuthAndFrame>
-                <RequirePermission
-                  isFeatureVisible={
-                    featureVisibility[FeatureNames.AuditLog] &&
-                    Boolean(permissions?.viewAuditLog)
-                  }
-                >
-                  <AuditPage />
-                </RequirePermission>
-              </AuthAndFrame>
-            }
-          />
-        </Route>
-
-        <Route path="/settings/deployment">
-          <Route
-            path="general"
-            element={
-              <AuthAndFrame>
-                <RequirePermission
-                  isFeatureVisible={Boolean(permissions?.viewDeploymentConfig)}
-                >
-                  <DeploySettingsLayout>
-                    <GeneralSettingsPage />
-                  </DeploySettingsLayout>
-                </RequirePermission>
-              </AuthAndFrame>
-            }
-          />
-          <Route
-            path="security"
-            element={
-              <AuthAndFrame>
-                <RequirePermission
-                  isFeatureVisible={Boolean(permissions?.viewDeploymentConfig)}
-                >
-                  <DeploySettingsLayout>
-                    <SecuritySettingsPage />
-                  </DeploySettingsLayout>
-                </RequirePermission>
-              </AuthAndFrame>
-            }
-          />
-          <Route
-            path="network"
-            element={
-              <AuthAndFrame>
-                <RequirePermission
-                  isFeatureVisible={Boolean(permissions?.viewDeploymentConfig)}
-                >
-                  <DeploySettingsLayout>
-                    <NetworkSettingsPage />
-                  </DeploySettingsLayout>
-                </RequirePermission>
-              </AuthAndFrame>
-            }
-          />
-          <Route
-            path="userauth"
-            element={
-              <AuthAndFrame>
-                <RequirePermission
-                  isFeatureVisible={Boolean(permissions?.viewDeploymentConfig)}
-                >
-                  <DeploySettingsLayout>
-                    <UserAuthSettingsPage />
-                  </DeploySettingsLayout>
-                </RequirePermission>
-              </AuthAndFrame>
-            }
-          />
-          <Route
-            path="gitauth"
-            element={
-              <AuthAndFrame>
-                <RequirePermission
-                  isFeatureVisible={Boolean(permissions?.viewDeploymentConfig)}
-                >
-                  <DeploySettingsLayout>
-                    <GitAuthSettingsPage />
-                  </DeploySettingsLayout>
-                </RequirePermission>
-              </AuthAndFrame>
-            }
-          />
-        </Route>
-
-        <Route path="settings" element={<SettingsLayout />}>
-          <Route path="account" element={<AccountPage />} />
-          <Route path="security" element={<SecurityPage />} />
-          <Route path="ssh-keys" element={<SSHKeysPage />} />
-        </Route>
-
-        <Route path="/@:username">
-          <Route path=":workspace">
-            <Route
-              index
-              element={
-                <AuthAndFrame>
-                  <WorkspacePage />
-                </AuthAndFrame>
-              }
-            />
-            <Route
-              path="schedule"
-              element={
-                <RequireAuth>
-                  <WorkspaceSchedulePage />
-                </RequireAuth>
-              }
-            />
-
-            <Route
-              path="terminal"
-              element={
-                <RequireAuth>
-                  <TerminalPage />
-                </RequireAuth>
-              }
-            />
-
-            <Route
-              path="builds/:buildNumber"
-              element={
-                <AuthAndFrame>
-                  <WorkspaceBuildPage />
-                </AuthAndFrame>
-              }
-            />
-          </Route>
-        </Route>
-
-        {/* Using path="*"" means "match anything", so this route
+          {/* Using path="*"" means "match anything", so this route
         acts like a catch-all for URLs that we don't have explicit
         routes for. */}
-        <Route path="*" element={<NotFoundPage />} />
-      </Routes>
+          <Route path="*" element={<NotFoundPage />} />
+        </Routes>
+      </Router>
     </Suspense>
   )
 }

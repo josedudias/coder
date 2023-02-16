@@ -36,7 +36,7 @@ func setupProvisioner(t *testing.T, opts *provisionerServeOptions) (context.Cont
 		opts = &provisionerServeOptions{}
 	}
 	cachePath := t.TempDir()
-	client, server := provisionersdk.TransportPipe()
+	client, server := provisionersdk.MemTransportPipe()
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	serverErr := make(chan error, 1)
 	t.Cleanup(func() {
@@ -59,7 +59,7 @@ func setupProvisioner(t *testing.T, opts *provisionerServeOptions) (context.Cont
 			ExitTimeout: opts.exitTimeout,
 		})
 	}()
-	api := proto.NewDRPCProvisionerClient(provisionersdk.Conn(client))
+	api := proto.NewDRPCProvisionerClient(client)
 	return ctx, api
 }
 
@@ -77,7 +77,7 @@ func readProvisionLog(t *testing.T, response proto.DRPCProvisioner_ProvisionClie
 
 		if log := msg.GetLog(); log != nil {
 			t.Log(log.Level.String(), log.Output)
-			logBuf.WriteString(log.Output)
+			_, _ = logBuf.WriteString(log.Output)
 		}
 		if c = msg.GetComplete(); c != nil {
 			require.Empty(t, c.Error)
@@ -189,8 +189,6 @@ func TestProvision_Cancel(t *testing.T) {
 
 func TestProvision(t *testing.T) {
 	t.Parallel()
-
-	ctx, api := setupProvisioner(t, nil)
 
 	testCases := []struct {
 		Name    string
@@ -322,12 +320,57 @@ func TestProvision(t *testing.T) {
 			},
 			ErrorContains: "unsupported parameter type",
 		},
+		{
+			Name: "rich-parameter-with-value",
+			Files: map[string]string{
+				"main.tf": `terraform {
+					required_providers {
+					  coder = {
+						source  = "coder/coder"
+						version = "0.6.6"
+					  }
+					}
+				  }
+
+				  data "coder_parameter" "example" {
+					name = "Example"
+					type = "string"
+					default = "foobar"
+				  }
+
+				  resource "null_resource" "example" {
+					triggers = {
+						misc = "${data.coder_parameter.example.value}"
+					}
+				  }`,
+			},
+			Request: &proto.Provision_Plan{
+				RichParameterValues: []*proto.RichParameterValue{
+					{
+						Name:  "Example",
+						Value: "foobaz",
+					},
+				},
+			},
+			Response: &proto.Provision_Response{
+				Type: &proto.Provision_Response_Complete{
+					Complete: &proto.Provision_Complete{
+						Resources: []*proto.Resource{{
+							Name: "example",
+							Type: "null_resource",
+						}},
+					},
+				},
+			},
+		},
 	}
 
 	for _, testCase := range testCases {
 		testCase := testCase
 		t.Run(testCase.Name, func(t *testing.T) {
 			t.Parallel()
+
+			ctx, api := setupProvisioner(t, nil)
 
 			directory := t.TempDir()
 			for path, content := range testCase.Files {

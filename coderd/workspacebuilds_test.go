@@ -171,6 +171,8 @@ func TestWorkspaceBuilds(t *testing.T) {
 		)
 		require.NoError(t, err)
 		require.Len(t, builds, 0)
+		// Should never be nil for API consistency
+		require.NotNil(t, builds)
 
 		builds, err = client.WorkspaceBuilds(ctx,
 			codersdk.WorkspaceBuildsRequest{WorkspaceID: workspace.ID, Since: database.Now().Add(-time.Hour)},
@@ -183,13 +185,11 @@ func TestWorkspaceBuilds(t *testing.T) {
 		t.Parallel()
 		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
 		first := coderdtest.CreateFirstUser(t, client)
-		second := coderdtest.CreateAnotherUser(t, client, first.OrganizationID, "owner")
+		second, secondUser := coderdtest.CreateAnotherUser(t, client, first.OrganizationID, "owner")
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
 
-		secondUser, err := second.User(ctx, codersdk.Me)
-		require.NoError(t, err, "fetch me")
 		version := coderdtest.CreateTemplateVersion(t, client, first.OrganizationID, nil)
 		template := coderdtest.CreateTemplate(t, client, first.OrganizationID, version.ID)
 		coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
@@ -305,7 +305,7 @@ func TestWorkspaceBuildsProvisionerState(t *testing.T) {
 
 		// A regular user on the very same template must not be able to modify the
 		// state.
-		regularUser := coderdtest.CreateAnotherUser(t, client, first.OrganizationID)
+		regularUser, _ := coderdtest.CreateAnotherUser(t, client, first.OrganizationID)
 
 		workspace = coderdtest.CreateWorkspace(t, regularUser, first.OrganizationID, template.ID)
 		coderdtest.AwaitWorkspaceBuildJob(t, regularUser, workspace.LatestBuild.ID)
@@ -367,41 +367,79 @@ func TestWorkspaceBuildsProvisionerState(t *testing.T) {
 
 func TestPatchCancelWorkspaceBuild(t *testing.T) {
 	t.Parallel()
-	client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
-	user := coderdtest.CreateFirstUser(t, client)
-	version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
-		Parse: echo.ParseComplete,
-		ProvisionApply: []*proto.Provision_Response{{
-			Type: &proto.Provision_Response_Log{
-				Log: &proto.Log{},
-			},
-		}},
-		ProvisionPlan: echo.ProvisionComplete,
+	t.Run("User is allowed to cancel", func(t *testing.T) {
+		t.Parallel()
+
+		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
+		user := coderdtest.CreateFirstUser(t, client)
+		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
+			Parse: echo.ParseComplete,
+			ProvisionApply: []*proto.Provision_Response{{
+				Type: &proto.Provision_Response_Log{
+					Log: &proto.Log{},
+				},
+			}},
+			ProvisionPlan: echo.ProvisionComplete,
+		})
+		coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
+		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
+		workspace := coderdtest.CreateWorkspace(t, client, user.OrganizationID, template.ID)
+		var build codersdk.WorkspaceBuild
+
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+		defer cancel()
+
+		require.Eventually(t, func() bool {
+			var err error
+			build, err = client.WorkspaceBuild(ctx, workspace.LatestBuild.ID)
+			return assert.NoError(t, err) && build.Job.Status == codersdk.ProvisionerJobRunning
+		}, testutil.WaitShort, testutil.IntervalFast)
+		err := client.CancelWorkspaceBuild(ctx, build.ID)
+		require.NoError(t, err)
+		require.Eventually(t, func() bool {
+			var err error
+			build, err = client.WorkspaceBuild(ctx, build.ID)
+			return assert.NoError(t, err) &&
+				// The job will never actually cancel successfully because it will never send a
+				// provision complete response.
+				assert.Empty(t, build.Job.Error) &&
+				build.Job.Status == codersdk.ProvisionerJobCanceling
+		}, testutil.WaitShort, testutil.IntervalFast)
 	})
-	coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
-	template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
-	workspace := coderdtest.CreateWorkspace(t, client, user.OrganizationID, template.ID)
-	var build codersdk.WorkspaceBuild
+	t.Run("User is not allowed to cancel", func(t *testing.T) {
+		t.Parallel()
 
-	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
-	defer cancel()
+		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
+		owner := coderdtest.CreateFirstUser(t, client)
+		version := coderdtest.CreateTemplateVersion(t, client, owner.OrganizationID, &echo.Responses{
+			Parse: echo.ParseComplete,
+			ProvisionApply: []*proto.Provision_Response{{
+				Type: &proto.Provision_Response_Log{
+					Log: &proto.Log{},
+				},
+			}},
+			ProvisionPlan: echo.ProvisionComplete,
+		})
+		coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
+		template := coderdtest.CreateTemplate(t, client, owner.OrganizationID, version.ID)
 
-	require.Eventually(t, func() bool {
-		var err error
-		build, err = client.WorkspaceBuild(ctx, workspace.LatestBuild.ID)
-		return assert.NoError(t, err) && build.Job.Status == codersdk.ProvisionerJobRunning
-	}, testutil.WaitShort, testutil.IntervalFast)
-	err := client.CancelWorkspaceBuild(ctx, build.ID)
-	require.NoError(t, err)
-	require.Eventually(t, func() bool {
-		var err error
-		build, err = client.WorkspaceBuild(ctx, build.ID)
-		return assert.NoError(t, err) &&
-			// The job will never actually cancel successfully because it will never send a
-			// provision complete response.
-			assert.Empty(t, build.Job.Error) &&
-			build.Job.Status == codersdk.ProvisionerJobCanceling
-	}, testutil.WaitShort, testutil.IntervalFast)
+		userClient, _ := coderdtest.CreateAnotherUser(t, client, owner.OrganizationID)
+		workspace := coderdtest.CreateWorkspace(t, userClient, owner.OrganizationID, template.ID)
+		var build codersdk.WorkspaceBuild
+
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+		defer cancel()
+
+		require.Eventually(t, func() bool {
+			var err error
+			build, err = userClient.WorkspaceBuild(ctx, workspace.LatestBuild.ID)
+			return assert.NoError(t, err) && build.Job.Status == codersdk.ProvisionerJobRunning
+		}, testutil.WaitShort, testutil.IntervalFast)
+		err := userClient.CancelWorkspaceBuild(ctx, build.ID)
+		var apiErr *codersdk.Error
+		require.ErrorAs(t, err, &apiErr)
+		require.Equal(t, http.StatusForbidden, apiErr.StatusCode())
+	})
 }
 
 func TestWorkspaceBuildResources(t *testing.T) {
@@ -538,9 +576,10 @@ func TestWorkspaceBuildStatus(t *testing.T) {
 	numLogs := len(auditor.AuditLogs)
 	client, closeDaemon, api := coderdtest.NewWithAPI(t, &coderdtest.Options{IncludeProvisionerDaemon: true, Auditor: auditor})
 	user := coderdtest.CreateFirstUser(t, client)
-	numLogs++ // add an audit log for user
+	numLogs++ // add an audit log for login
 	version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, nil)
-	numLogs++ // add an audit log for template version
+	numLogs++ // add an audit log for template version creation
+	numLogs++ // add an audit log for template version update
 
 	coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
 	closeDaemon.Close()
@@ -560,6 +599,8 @@ func TestWorkspaceBuildStatus(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, codersdk.WorkspaceStatusRunning, workspace.LatestBuild.Status)
 
+	numLogs++ // add an audit log for workspace_build starting
+
 	// after successful stop is "stopped"
 	build := coderdtest.CreateWorkspaceBuild(t, client, workspace, database.WorkspaceTransitionStop)
 	_ = coderdtest.AwaitWorkspaceBuildJob(t, client, build.ID)
@@ -578,11 +619,6 @@ func TestWorkspaceBuildStatus(t *testing.T) {
 	err = client.CancelWorkspaceBuild(ctx, build.ID)
 	require.NoError(t, err)
 
-	numLogs++ // add an audit log for workspace build start
-	// assert an audit log has been created workspace starting
-	require.Len(t, auditor.AuditLogs, numLogs)
-	require.Equal(t, database.AuditActionStart, auditor.AuditLogs[numLogs-1].Action)
-
 	workspace, err = client.Workspace(ctx, workspace.ID)
 	require.NoError(t, err)
 	require.EqualValues(t, codersdk.WorkspaceStatusCanceled, workspace.LatestBuild.Status)
@@ -594,9 +630,342 @@ func TestWorkspaceBuildStatus(t *testing.T) {
 	workspace, err = client.DeletedWorkspace(ctx, workspace.ID)
 	require.NoError(t, err)
 	require.EqualValues(t, codersdk.WorkspaceStatusDeleted, workspace.LatestBuild.Status)
-	numLogs++ // add an audit log for workspace build deletion
+}
 
-	// assert an audit log has been created for deletion
-	require.Len(t, auditor.AuditLogs, numLogs)
-	require.Equal(t, database.AuditActionDelete, auditor.AuditLogs[numLogs-1].Action)
+func TestWorkspaceBuildWithRichParameters(t *testing.T) {
+	t.Parallel()
+
+	const (
+		firstParameterName        = "first_parameter"
+		firstParameterDescription = "This is first parameter"
+		firstParameterValue       = "1"
+
+		secondParameterName        = "second_parameter"
+		secondParameterDescription = "This is second parameter"
+		secondParameterValue       = "2"
+
+		immutableParameterName        = "immutable_parameter"
+		immutableParameterDescription = "This is immutable parameter"
+		immutableParameterValue       = "3"
+	)
+
+	initialBuildParameters := []codersdk.WorkspaceBuildParameter{
+		{Name: firstParameterName, Value: firstParameterValue},
+		{Name: secondParameterName, Value: secondParameterValue},
+		{Name: immutableParameterName, Value: immutableParameterValue},
+	}
+
+	echoResponses := &echo.Responses{
+		Parse: echo.ParseComplete,
+		ProvisionPlan: []*proto.Provision_Response{
+			{
+				Type: &proto.Provision_Response_Complete{
+					Complete: &proto.Provision_Complete{
+						Parameters: []*proto.RichParameter{
+							{Name: firstParameterName, Description: firstParameterDescription, Mutable: true},
+							{Name: secondParameterName, Description: secondParameterDescription, Mutable: true},
+							{Name: immutableParameterName, Description: immutableParameterDescription, Mutable: false},
+						},
+					},
+				},
+			}},
+		ProvisionApply: []*proto.Provision_Response{{
+			Type: &proto.Provision_Response_Complete{
+				Complete: &proto.Provision_Complete{},
+			},
+		}},
+	}
+
+	t.Run("UpdateParameterValues", func(t *testing.T) {
+		t.Parallel()
+
+		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
+		user := coderdtest.CreateFirstUser(t, client)
+		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, echoResponses)
+		coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
+
+		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
+		workspace := coderdtest.CreateWorkspace(t, client, user.OrganizationID, template.ID, func(cwr *codersdk.CreateWorkspaceRequest) {
+			cwr.RichParameterValues = initialBuildParameters
+		})
+
+		workspaceBuild := coderdtest.AwaitWorkspaceBuildJob(t, client, workspace.LatestBuild.ID)
+		require.Equal(t, codersdk.WorkspaceStatusRunning, workspaceBuild.Status)
+
+		// Update build parameters
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+		defer cancel()
+
+		const updatedParameterValue = "3"
+		nextBuildParameters := []codersdk.WorkspaceBuildParameter{
+			{Name: firstParameterName, Value: firstParameterValue},
+			{Name: secondParameterName, Value: updatedParameterValue},
+		}
+		nextWorkspaceBuild, err := client.CreateWorkspaceBuild(ctx, workspace.ID, codersdk.CreateWorkspaceBuildRequest{
+			Transition:          codersdk.WorkspaceTransitionStart,
+			RichParameterValues: nextBuildParameters,
+		})
+		require.NoError(t, err)
+		coderdtest.AwaitWorkspaceBuildJob(t, client, nextWorkspaceBuild.ID)
+
+		workspaceBuildParameters, err := client.WorkspaceBuildParameters(ctx, nextWorkspaceBuild.ID)
+		require.NoError(t, err)
+
+		expected := append(nextBuildParameters, codersdk.WorkspaceBuildParameter{
+			Name:  immutableParameterName,
+			Value: immutableParameterValue,
+		})
+		require.ElementsMatch(t, expected, workspaceBuildParameters)
+	})
+	t.Run("UsePreviousParameterValues", func(t *testing.T) {
+		t.Parallel()
+
+		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
+		user := coderdtest.CreateFirstUser(t, client)
+		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, echoResponses)
+		coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
+
+		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
+		workspace := coderdtest.CreateWorkspace(t, client, user.OrganizationID, template.ID, func(cwr *codersdk.CreateWorkspaceRequest) {
+			cwr.RichParameterValues = initialBuildParameters
+		})
+
+		firstWorkspaceBuild := coderdtest.AwaitWorkspaceBuildJob(t, client, workspace.LatestBuild.ID)
+		require.Equal(t, codersdk.WorkspaceStatusRunning, firstWorkspaceBuild.Status)
+
+		// Start new workspace build
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+		defer cancel()
+
+		nextWorkspaceBuild, err := client.CreateWorkspaceBuild(ctx, workspace.ID, codersdk.CreateWorkspaceBuildRequest{
+			Transition: codersdk.WorkspaceTransitionStart,
+		})
+		require.NoError(t, err)
+		require.NotEqual(t, firstWorkspaceBuild, nextWorkspaceBuild)
+		coderdtest.AwaitWorkspaceBuildJob(t, client, nextWorkspaceBuild.ID)
+
+		workspaceBuildParameters, err := client.WorkspaceBuildParameters(ctx, nextWorkspaceBuild.ID)
+		require.NoError(t, err)
+		require.ElementsMatch(t, initialBuildParameters, workspaceBuildParameters)
+	})
+
+	t.Run("DoNotModifyImmutables", func(t *testing.T) {
+		t.Parallel()
+
+		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
+		user := coderdtest.CreateFirstUser(t, client)
+		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, echoResponses)
+		coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
+
+		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
+		workspace := coderdtest.CreateWorkspace(t, client, user.OrganizationID, template.ID, func(cwr *codersdk.CreateWorkspaceRequest) {
+			cwr.RichParameterValues = initialBuildParameters
+		})
+
+		workspaceBuild := coderdtest.AwaitWorkspaceBuildJob(t, client, workspace.LatestBuild.ID)
+		require.Equal(t, codersdk.WorkspaceStatusRunning, workspaceBuild.Status)
+
+		// Update build parameters
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+		defer cancel()
+
+		nextBuildParameters := []codersdk.WorkspaceBuildParameter{
+			{Name: immutableParameterName, Value: "BAD"},
+		}
+		_, err := client.CreateWorkspaceBuild(ctx, workspace.ID, codersdk.CreateWorkspaceBuildRequest{
+			Transition:          codersdk.WorkspaceTransitionStart,
+			RichParameterValues: nextBuildParameters,
+		})
+		require.Error(t, err)
+	})
+}
+
+func TestWorkspaceBuildValidateRichParameters(t *testing.T) {
+	t.Parallel()
+
+	const (
+		stringParameterName  = "string_parameter"
+		stringParameterValue = "abc"
+
+		numberParameterName  = "number_parameter"
+		numberParameterValue = "7"
+
+		boolParameterName  = "bool_parameter"
+		boolParameterValue = "true"
+	)
+
+	initialBuildParameters := []codersdk.WorkspaceBuildParameter{
+		{Name: stringParameterName, Value: stringParameterValue},
+		{Name: numberParameterName, Value: numberParameterValue},
+		{Name: boolParameterName, Value: boolParameterValue},
+	}
+
+	prepareEchoResponses := func(richParameters []*proto.RichParameter) *echo.Responses {
+		return &echo.Responses{
+			Parse: echo.ParseComplete,
+			ProvisionPlan: []*proto.Provision_Response{
+				{
+					Type: &proto.Provision_Response_Complete{
+						Complete: &proto.Provision_Complete{
+							Parameters: richParameters,
+						},
+					},
+				}},
+			ProvisionApply: []*proto.Provision_Response{
+				{
+					Type: &proto.Provision_Response_Complete{
+						Complete: &proto.Provision_Complete{},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("NoValidation", func(t *testing.T) {
+		t.Parallel()
+
+		richParameters := []*proto.RichParameter{
+			{Name: stringParameterName, Type: "string", Mutable: true},
+			{Name: numberParameterName, Type: "number", Mutable: true},
+			{Name: boolParameterName, Type: "bool", Mutable: true},
+		}
+
+		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
+		user := coderdtest.CreateFirstUser(t, client)
+		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, prepareEchoResponses(richParameters))
+		coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
+
+		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
+		workspace := coderdtest.CreateWorkspace(t, client, user.OrganizationID, template.ID, func(cwr *codersdk.CreateWorkspaceRequest) {
+			cwr.RichParameterValues = initialBuildParameters
+		})
+
+		workspaceBuild := coderdtest.AwaitWorkspaceBuildJob(t, client, workspace.LatestBuild.ID)
+		require.Equal(t, codersdk.WorkspaceStatusRunning, workspaceBuild.Status)
+
+		// Update build parameters
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+		defer cancel()
+
+		nextBuildParameters := []codersdk.WorkspaceBuildParameter{
+			{Name: numberParameterName, Value: "42"},
+		}
+		nextWorkspaceBuild, err := client.CreateWorkspaceBuild(ctx, workspace.ID, codersdk.CreateWorkspaceBuildRequest{
+			Transition:          codersdk.WorkspaceTransitionStart,
+			RichParameterValues: nextBuildParameters,
+		})
+		require.NoError(t, err)
+		coderdtest.AwaitWorkspaceBuildJob(t, client, nextWorkspaceBuild.ID)
+
+		_, err = client.WorkspaceBuildParameters(ctx, nextWorkspaceBuild.ID)
+		require.NoError(t, err)
+	})
+
+	t.Run("Validation", func(t *testing.T) {
+		t.Parallel()
+
+		numberRichParameters := []*proto.RichParameter{
+			{Name: stringParameterName, Type: "string", Mutable: true},
+			{Name: numberParameterName, Type: "number", Mutable: true, ValidationMin: 3, ValidationMax: 10},
+			{Name: boolParameterName, Type: "bool", Mutable: true},
+		}
+
+		monotonicIncreasingNumberRichParameters := []*proto.RichParameter{
+			{Name: stringParameterName, Type: "string", Mutable: true},
+			{Name: numberParameterName, Type: "number", Mutable: true, ValidationMin: 3, ValidationMax: 10, ValidationMonotonic: "increasing"},
+			{Name: boolParameterName, Type: "bool", Mutable: true},
+		}
+
+		monotonicDecreasingNumberRichParameters := []*proto.RichParameter{
+			{Name: stringParameterName, Type: "string", Mutable: true},
+			{Name: numberParameterName, Type: "number", Mutable: true, ValidationMin: 3, ValidationMax: 10, ValidationMonotonic: "decreasing"},
+			{Name: boolParameterName, Type: "bool", Mutable: true},
+		}
+
+		stringRichParameters := []*proto.RichParameter{
+			{Name: stringParameterName, Type: "string", Mutable: true},
+			{Name: numberParameterName, Type: "number", Mutable: true},
+			{Name: boolParameterName, Type: "bool", Mutable: true},
+		}
+
+		boolRichParameters := []*proto.RichParameter{
+			{Name: stringParameterName, Type: "string", Mutable: true},
+			{Name: numberParameterName, Type: "number", Mutable: true},
+			{Name: boolParameterName, Type: "bool", Mutable: true},
+		}
+
+		regexRichParameters := []*proto.RichParameter{
+			{Name: stringParameterName, Type: "string", Mutable: true, ValidationRegex: "^[a-z]+$", ValidationError: "this is error"},
+			{Name: numberParameterName, Type: "number", Mutable: true},
+			{Name: boolParameterName, Type: "bool", Mutable: true},
+		}
+
+		tests := []struct {
+			parameterName  string
+			value          string
+			valid          bool
+			richParameters []*proto.RichParameter
+		}{
+			{numberParameterName, "2", false, numberRichParameters},
+			{numberParameterName, "3", true, numberRichParameters},
+			{numberParameterName, "10", true, numberRichParameters},
+			{numberParameterName, "11", false, numberRichParameters},
+
+			{numberParameterName, "6", false, monotonicIncreasingNumberRichParameters},
+			{numberParameterName, "7", true, monotonicIncreasingNumberRichParameters},
+			{numberParameterName, "8", true, monotonicIncreasingNumberRichParameters},
+
+			{numberParameterName, "6", true, monotonicDecreasingNumberRichParameters},
+			{numberParameterName, "7", true, monotonicDecreasingNumberRichParameters},
+			{numberParameterName, "8", false, monotonicDecreasingNumberRichParameters},
+
+			{stringParameterName, "", true, stringRichParameters},
+			{stringParameterName, "foobar", true, stringRichParameters},
+
+			{stringParameterName, "abcd", true, regexRichParameters},
+			{stringParameterName, "abcd1", false, regexRichParameters},
+
+			{boolParameterName, "true", true, boolRichParameters},
+			{boolParameterName, "false", true, boolRichParameters},
+			{boolParameterName, "cat", false, boolRichParameters},
+		}
+
+		for _, tc := range tests {
+			tc := tc
+			t.Run(tc.parameterName+"-"+tc.value, func(t *testing.T) {
+				t.Parallel()
+
+				client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
+				user := coderdtest.CreateFirstUser(t, client)
+				version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, prepareEchoResponses(tc.richParameters))
+				coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
+
+				template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
+				workspace := coderdtest.CreateWorkspace(t, client, user.OrganizationID, template.ID, func(cwr *codersdk.CreateWorkspaceRequest) {
+					cwr.RichParameterValues = initialBuildParameters
+				})
+
+				workspaceBuild := coderdtest.AwaitWorkspaceBuildJob(t, client, workspace.LatestBuild.ID)
+				require.Equal(t, codersdk.WorkspaceStatusRunning, workspaceBuild.Status)
+
+				ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+				defer cancel()
+
+				nextBuildParameters := []codersdk.WorkspaceBuildParameter{
+					{Name: tc.parameterName, Value: tc.value},
+				}
+				nextWorkspaceBuild, err := client.CreateWorkspaceBuild(ctx, workspace.ID, codersdk.CreateWorkspaceBuildRequest{
+					Transition:          codersdk.WorkspaceTransitionStart,
+					RichParameterValues: nextBuildParameters,
+				})
+
+				if tc.valid {
+					require.NoError(t, err)
+					coderdtest.AwaitWorkspaceBuildJob(t, client, nextWorkspaceBuild.ID)
+				} else {
+					require.Error(t, err)
+				}
+			})
+		}
+	})
 }

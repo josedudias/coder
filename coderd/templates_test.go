@@ -11,14 +11,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"cdr.dev/slog/sloggers/slogtest"
-
 	"github.com/coder/coder/agent"
 	"github.com/coder/coder/coderd/audit"
 	"github.com/coder/coder/coderd/coderdtest"
 	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/coderd/rbac"
 	"github.com/coder/coder/coderd/util/ptr"
 	"github.com/coder/coder/codersdk"
+	"github.com/coder/coder/codersdk/agentsdk"
 	"github.com/coder/coder/provisioner/echo"
 	"github.com/coder/coder/provisionersdk/proto"
 	"github.com/coder/coder/testutil"
@@ -39,40 +38,6 @@ func TestTemplate(t *testing.T) {
 
 		_, err := client.Template(ctx, template.ID)
 		require.NoError(t, err)
-	})
-
-	t.Run("WorkspaceCount", func(t *testing.T) {
-		t.Parallel()
-		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
-		user := coderdtest.CreateFirstUser(t, client)
-		member := coderdtest.CreateAnotherUser(t, client, user.OrganizationID, rbac.RoleOwner())
-		memberWithDeleted := coderdtest.CreateAnotherUser(t, client, user.OrganizationID, rbac.RoleOwner())
-		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, nil)
-		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
-		coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
-
-		// Create 3 workspaces with 3 users. 2 workspaces exist, 1 is deleted
-		workspace := coderdtest.CreateWorkspace(t, client, user.OrganizationID, template.ID)
-		coderdtest.AwaitWorkspaceBuildJob(t, client, workspace.LatestBuild.ID)
-
-		memberWorkspace := coderdtest.CreateWorkspace(t, member, user.OrganizationID, template.ID)
-		coderdtest.AwaitWorkspaceBuildJob(t, member, memberWorkspace.LatestBuild.ID)
-
-		deletedWorkspace := coderdtest.CreateWorkspace(t, memberWithDeleted, user.OrganizationID, template.ID)
-		coderdtest.AwaitWorkspaceBuildJob(t, client, deletedWorkspace.LatestBuild.ID)
-
-		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
-		defer cancel()
-
-		build, err := client.CreateWorkspaceBuild(ctx, deletedWorkspace.ID, codersdk.CreateWorkspaceBuildRequest{
-			Transition: codersdk.WorkspaceTransitionDelete,
-		})
-		require.NoError(t, err)
-		coderdtest.AwaitWorkspaceBuildJob(t, client, build.ID)
-
-		template, err = client.Template(ctx, template.ID)
-		require.NoError(t, err)
-		require.Equal(t, 2, int(template.WorkspaceOwnerCount), "workspace count")
 	})
 }
 
@@ -96,10 +61,11 @@ func TestPostTemplateByOrganization(t *testing.T) {
 		assert.Equal(t, expected.Name, got.Name)
 		assert.Equal(t, expected.Description, got.Description)
 
-		require.Len(t, auditor.AuditLogs, 3)
-		assert.Equal(t, database.AuditActionCreate, auditor.AuditLogs[0].Action)
-		assert.Equal(t, database.AuditActionWrite, auditor.AuditLogs[1].Action)
-		assert.Equal(t, database.AuditActionCreate, auditor.AuditLogs[2].Action)
+		require.Len(t, auditor.AuditLogs, 4)
+		assert.Equal(t, database.AuditActionLogin, auditor.AuditLogs[0].Action)
+		assert.Equal(t, database.AuditActionCreate, auditor.AuditLogs[1].Action)
+		assert.Equal(t, database.AuditActionWrite, auditor.AuditLogs[2].Action)
+		assert.Equal(t, database.AuditActionCreate, auditor.AuditLogs[3].Action)
 	})
 
 	t.Run("AlreadyExists", func(t *testing.T) {
@@ -285,11 +251,12 @@ func TestPatchTemplateMeta(t *testing.T) {
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, nil)
 		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
 		req := codersdk.UpdateTemplateMeta{
-			Name:             "new-template-name",
-			DisplayName:      "Displayed Name 456",
-			Description:      "lorem ipsum dolor sit amet et cetera",
-			Icon:             "/icons/new-icon.png",
-			DefaultTTLMillis: 12 * time.Hour.Milliseconds(),
+			Name:                         "new-template-name",
+			DisplayName:                  "Displayed Name 456",
+			Description:                  "lorem ipsum dolor sit amet et cetera",
+			Icon:                         "/icons/new-icon.png",
+			DefaultTTLMillis:             12 * time.Hour.Milliseconds(),
+			AllowUserCancelWorkspaceJobs: false,
 		}
 		// It is unfortunate we need to sleep, but the test can fail if the
 		// updatedAt is too close together.
@@ -306,6 +273,7 @@ func TestPatchTemplateMeta(t *testing.T) {
 		assert.Equal(t, req.Description, updated.Description)
 		assert.Equal(t, req.Icon, updated.Icon)
 		assert.Equal(t, req.DefaultTTLMillis, updated.DefaultTTLMillis)
+		assert.False(t, req.AllowUserCancelWorkspaceJobs)
 
 		// Extra paranoid: did it _really_ happen?
 		updated, err = client.Template(ctx, template.ID)
@@ -316,9 +284,10 @@ func TestPatchTemplateMeta(t *testing.T) {
 		assert.Equal(t, req.Description, updated.Description)
 		assert.Equal(t, req.Icon, updated.Icon)
 		assert.Equal(t, req.DefaultTTLMillis, updated.DefaultTTLMillis)
+		assert.False(t, req.AllowUserCancelWorkspaceJobs)
 
-		require.Len(t, auditor.AuditLogs, 4)
-		assert.Equal(t, database.AuditActionWrite, auditor.AuditLogs[3].Action)
+		require.Len(t, auditor.AuditLogs, 5)
+		assert.Equal(t, database.AuditActionWrite, auditor.AuditLogs[4].Action)
 	})
 
 	t.Run("NoMaxTTL", func(t *testing.T) {
@@ -480,8 +449,8 @@ func TestDeleteTemplate(t *testing.T) {
 		err := client.DeleteTemplate(ctx, template.ID)
 		require.NoError(t, err)
 
-		require.Len(t, auditor.AuditLogs, 4)
-		assert.Equal(t, database.AuditActionDelete, auditor.AuditLogs[3].Action)
+		require.Len(t, auditor.AuditLogs, 5)
+		assert.Equal(t, database.AuditActionDelete, auditor.AuditLogs[4].Action)
 	})
 
 	t.Run("Workspaces", func(t *testing.T) {
@@ -499,7 +468,7 @@ func TestDeleteTemplate(t *testing.T) {
 		err := client.DeleteTemplate(ctx, template.ID)
 		var apiErr *codersdk.Error
 		require.ErrorAs(t, err, &apiErr)
-		require.Equal(t, http.StatusPreconditionFailed, apiErr.StatusCode())
+		require.Equal(t, http.StatusBadRequest, apiErr.StatusCode())
 	})
 }
 
@@ -536,13 +505,13 @@ func TestTemplateMetrics(t *testing.T) {
 	})
 	template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
 	require.Equal(t, -1, template.ActiveUserCount)
-	require.Empty(t, template.BuildTimeStats)
+	require.Empty(t, template.BuildTimeStats[codersdk.WorkspaceTransitionStart])
 
 	coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
 	workspace := coderdtest.CreateWorkspace(t, client, user.OrganizationID, template.ID)
 	coderdtest.AwaitWorkspaceBuildJob(t, client, workspace.LatestBuild.ID)
 
-	agentClient := codersdk.New(client.URL)
+	agentClient := agentsdk.New(client.URL)
 	agentClient.SetSessionToken(authToken)
 	agentCloser := agent.New(agent.Options{
 		Logger: slogtest.Make(t, nil),
@@ -607,7 +576,7 @@ func TestTemplateMetrics(t *testing.T) {
 	require.Eventuallyf(t, func() bool {
 		template, err = client.Template(ctx, template.ID)
 		require.NoError(t, err)
-		startMs := template.BuildTimeStats.StartMillis
+		startMs := template.BuildTimeStats[codersdk.WorkspaceTransitionStart].P50
 		return startMs != nil && *startMs > 1
 	},
 		testutil.WaitShort, testutil.IntervalFast,

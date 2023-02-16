@@ -1,36 +1,29 @@
 import CircularProgress from "@material-ui/core/CircularProgress"
-import { makeStyles, Theme } from "@material-ui/core/styles"
+import { makeStyles } from "@material-ui/core/styles"
 import TextField from "@material-ui/core/TextField"
 import Autocomplete from "@material-ui/lab/Autocomplete"
 import { useMachine } from "@xstate/react"
 import { User } from "api/typesGenerated"
+import { Avatar } from "components/Avatar/Avatar"
 import { AvatarData } from "components/AvatarData/AvatarData"
 import debounce from "just-debounce-it"
 import { ChangeEvent, FC, useEffect, useState } from "react"
-import { combineClasses } from "util/combineClasses"
 import { searchUserMachine } from "xServices/users/searchUserXService"
-import { AutocompleteAvatar } from "./AutocompleteAvatar"
 
 export type UserAutocompleteProps = {
   value: User | null
   onChange: (user: User | null) => void
   label?: string
-  inputMargin?: "none" | "dense" | "normal"
-  inputStyles?: string
   className?: string
-  showAvatar?: boolean
 }
 
 export const UserAutocomplete: FC<UserAutocompleteProps> = ({
   value,
   onChange,
-  className,
   label,
-  inputMargin,
-  inputStyles,
-  showAvatar = false,
+  className,
 }) => {
-  const styles = useStyles({ showAvatar })
+  const styles = useStyles()
   const [isAutocompleteOpen, setIsAutocompleteOpen] = useState(false)
   const [searchState, sendSearch] = useMachine(searchUserMachine)
   const { searchResults } = searchState.context
@@ -53,6 +46,9 @@ export const UserAutocomplete: FC<UserAutocompleteProps> = ({
 
   return (
     <Autocomplete
+      className={className}
+      options={searchResults}
+      loading={searchState.matches("searching")}
       value={value}
       id="user-autocomplete"
       open={isAutocompleteOpen}
@@ -77,34 +73,24 @@ export const UserAutocomplete: FC<UserAutocompleteProps> = ({
         <AvatarData
           title={option.username}
           subtitle={option.email}
-          highlightTitle
-          avatar={
-            option.avatar_url ? (
-              <img
-                className={styles.avatar}
-                alt={`${option.username}'s Avatar`}
-                src={option.avatar_url}
-              />
-            ) : null
-          }
+          src={option.avatar_url}
         />
       )}
-      options={searchResults}
-      loading={searchState.matches("searching")}
-      className={combineClasses([styles.autocomplete, className])}
       renderInput={(params) => (
         <TextField
           {...params}
+          fullWidth
           variant="outlined"
-          margin={inputMargin ?? "normal"}
           label={label ?? undefined}
           placeholder="User email or username"
-          className={inputStyles}
+          className={styles.textField}
           InputProps={{
             ...params.InputProps,
             onChange: handleFilterChange,
-            startAdornment: (
-              <>{showAvatar && value && <AutocompleteAvatar user={value} />}</>
+            startAdornment: value && (
+              <Avatar size="sm" src={value.avatar_url}>
+                {value.username}
+              </Avatar>
             ),
             endAdornment: (
               <>
@@ -114,6 +100,9 @@ export const UserAutocomplete: FC<UserAutocompleteProps> = ({
                 {params.InputProps.endAdornment}
               </>
             ),
+            classes: {
+              root: styles.inputRoot,
+            },
           }}
         />
       )}
@@ -121,60 +110,14 @@ export const UserAutocomplete: FC<UserAutocompleteProps> = ({
   )
 }
 
-interface styleProps {
-  showAvatar: boolean
-}
-
-export const useStyles = makeStyles<Theme, styleProps>((theme) => {
-  return {
-    autocomplete: (props) => ({
-      width: "100%",
-
-      "& .MuiFormControl-root": {
-        width: "100%",
-      },
-
-      "& .MuiInputBase-root": {
-        width: "100%",
-        // Match button small height
-        height: props.showAvatar ? 60 : 40,
-      },
-
-      "& input": {
-        fontSize: 16,
-        padding: `${theme.spacing(0, 0.5, 0, 0.5)} !important`,
-      },
-    }),
-
-    avatar: {
-      width: theme.spacing(4.5),
-      height: theme.spacing(4.5),
-      borderRadius: "100%",
+export const useStyles = makeStyles((theme) => ({
+  textField: {
+    "&:not(:has(label))": {
+      margin: 0,
     },
-  }
-})
-
-export const UserAutocompleteInline: React.FC<UserAutocompleteProps> = (
-  props,
-) => {
-  const style = useInlineStyle()
-
-  return <UserAutocomplete {...props} className={style.inline} />
-}
-
-export const useInlineStyle = makeStyles(() => {
-  return {
-    inline: {
-      width: "300px",
-
-      "& .MuiFormControl-root": {
-        margin: 0,
-      },
-
-      "& .MuiInputBase-root": {
-        // Match button small height
-        height: 36,
-      },
-    },
-  }
-})
+  },
+  inputRoot: {
+    paddingLeft: `${theme.spacing(1.75)}px !important`, // Same padding left as input
+    gap: theme.spacing(0.5),
+  },
+}))

@@ -15,10 +15,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v4"
+	"github.com/google/uuid"
 	"golang.org/x/xerrors"
 
 	"cdr.dev/slog"
 	"github.com/coder/coder/coderd"
+	"github.com/coder/coder/coderd/audit"
 	"github.com/coder/coder/coderd/database"
 	"github.com/coder/coder/coderd/httpapi"
 	"github.com/coder/coder/coderd/rbac"
@@ -47,8 +49,29 @@ var Keys = map[string]ed25519.PublicKey{"2022-08-12": ed25519.PublicKey(key20220
 //     we generally don't want the old features to immediately break without warning.  With a grace
 //     period on the license, features will continue to work from the old license until its grace
 //     period, then the users will get a warning allowing them to gracefully stop using the feature.
+//
+// @Summary Add new license
+// @ID add-new-license
+// @Security CoderSessionToken
+// @Accept json
+// @Produce json
+// @Tags Organizations
+// @Param request body codersdk.AddLicenseRequest true "Add license request"
+// @Success 201 {object} codersdk.License
+// @Router /licenses [post]
 func (api *API) postLicense(rw http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	var (
+		ctx               = r.Context()
+		auditor           = api.AGPL.Auditor.Load()
+		aReq, commitAudit = audit.InitRequest[database.License](rw, &audit.RequestParams{
+			Audit:   *auditor,
+			Log:     api.Logger,
+			Request: r,
+			Action:  database.AuditActionCreate,
+		})
+	)
+	defer commitAudit()
+
 	if !api.AGPL.Authorize(r, rbac.ActionCreate, rbac.ResourceLicense) {
 		httpapi.Forbidden(rw)
 		return
@@ -59,7 +82,7 @@ func (api *API) postLicense(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims, err := license.Parse(addLicense.License, api.Keys)
+	rawClaims, err := license.ParseRaw(addLicense.License, api.Keys)
 	if err != nil {
 		httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
 			Message: "Invalid license",
@@ -67,7 +90,7 @@ func (api *API) postLicense(rw http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	exp, ok := claims["exp"].(float64)
+	exp, ok := rawClaims["exp"].(float64)
 	if !ok {
 		httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
 			Message: "Invalid license",
@@ -77,10 +100,29 @@ func (api *API) postLicense(rw http.ResponseWriter, r *http.Request) {
 	}
 	expTime := time.Unix(int64(exp), 0)
 
+	claims, err := license.ParseClaims(addLicense.License, api.Keys)
+	if err != nil {
+		httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
+			Message: "Invalid license",
+			Detail:  err.Error(),
+		})
+		return
+	}
+
+	id, err := uuid.Parse(claims.ID)
+	if err != nil {
+		// If no uuid is in the license, we generate a random uuid.
+		// This is not ideal, and this should be fixed to require a uuid
+		// for all licenses. We require this patch to support older licenses.
+		// TODO: In the future (April 2023?) we should remove this and reissue
+		// old licenses with a uuid.
+		id = uuid.New()
+	}
 	dl, err := api.Database.InsertLicense(ctx, database.InsertLicenseParams{
 		UploadedAt: database.Now(),
 		JWT:        addLicense.License,
 		Exp:        expTime,
+		UUID:       id,
 	})
 	if err != nil {
 		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
@@ -89,6 +131,8 @@ func (api *API) postLicense(rw http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	aReq.New = dl
+
 	err = api.updateEntitlements(ctx)
 	if err != nil {
 		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
@@ -103,9 +147,16 @@ func (api *API) postLicense(rw http.ResponseWriter, r *http.Request) {
 		// don't fail the HTTP request, since we did write it successfully to the database
 	}
 
-	httpapi.Write(ctx, rw, http.StatusCreated, convertLicense(dl, claims))
+	httpapi.Write(ctx, rw, http.StatusCreated, convertLicense(dl, rawClaims))
 }
 
+// @Summary Get licenses
+// @ID get-licenses
+// @Security CoderSessionToken
+// @Produce json
+// @Tags Enterprise
+// @Success 200 {array} codersdk.License
+// @Router /licenses [get]
 func (api *API) licenses(rw http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	licenses, err := api.Database.GetLicenses(ctx)
@@ -140,12 +191,19 @@ func (api *API) licenses(rw http.ResponseWriter, r *http.Request) {
 	httpapi.Write(ctx, rw, http.StatusOK, sdkLicenses)
 }
 
+// @Summary Delete license
+// @ID delete-license
+// @Security CoderSessionToken
+// @Produce json
+// @Tags Enterprise
+// @Param id path string true "License ID" format(number)
+// @Success 200
+// @Router /licenses/{id} [delete]
 func (api *API) deleteLicense(rw http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	if !api.AGPL.Authorize(r, rbac.ActionDelete, rbac.ResourceLicense) {
-		httpapi.Forbidden(rw)
-		return
-	}
+	var (
+		ctx     = r.Context()
+		auditor = api.AGPL.Auditor.Load()
+	)
 
 	idStr := chi.URLParam(r, "id")
 	id, err := strconv.ParseInt(idStr, 10, 32)
@@ -153,6 +211,26 @@ func (api *API) deleteLicense(rw http.ResponseWriter, r *http.Request) {
 		httpapi.Write(ctx, rw, http.StatusNotFound, codersdk.Response{
 			Message: "License ID must be an integer",
 		})
+		return
+	}
+
+	dl, err := api.Database.GetLicenseByID(ctx, int32(id))
+	if err != nil {
+		// don't fail the HTTP request simply because we cannot audit
+		api.Logger.Warn(context.Background(), "could not retrieve license; cannot audit", slog.Error(err))
+	}
+
+	aReq, commitAudit := audit.InitRequest[database.License](rw, &audit.RequestParams{
+		Audit:   *auditor,
+		Log:     api.Logger,
+		Request: r,
+		Action:  database.AuditActionDelete,
+	})
+	defer commitAudit()
+	aReq.Old = dl
+
+	if !api.AGPL.Authorize(r, rbac.ActionDelete, rbac.ResourceLicense) {
+		httpapi.Forbidden(rw)
 		return
 	}
 
@@ -189,6 +267,7 @@ func (api *API) deleteLicense(rw http.ResponseWriter, r *http.Request) {
 func convertLicense(dl database.License, c jwt.MapClaims) codersdk.License {
 	return codersdk.License{
 		ID:         dl.ID,
+		UUID:       dl.UUID,
 		UploadedAt: dl.UploadedAt,
 		Claims:     c,
 	}

@@ -11,6 +11,8 @@ export enum ButtonTypesEnum {
   deleting = "deleting",
   update = "update",
   updating = "updating",
+  changeVersion = "changeVersion",
+  buildParameters = "buildParameters",
   // disabled buttons
   canceling = "canceling",
   deleted = "deleted",
@@ -27,14 +29,36 @@ interface WorkspaceAbilities {
   canAcceptJobs: boolean
 }
 
-export const statusToAbilities: Record<WorkspaceStatus, WorkspaceAbilities> = {
+export const buttonAbilities = (
+  status: WorkspaceStatus,
+  hasTemplateParameters: boolean,
+): WorkspaceAbilities => {
+  if (hasTemplateParameters) {
+    return statusToAbilities[status]
+  }
+
+  const all = statusToAbilities[status]
+  return {
+    ...all,
+    actions: all.actions.filter(
+      (action) => action !== ButtonTypesEnum.buildParameters,
+    ),
+  }
+}
+
+const statusToAbilities: Record<WorkspaceStatus, WorkspaceAbilities> = {
   starting: {
     actions: [ButtonTypesEnum.starting],
     canCancel: true,
     canAcceptJobs: false,
   },
   running: {
-    actions: [ButtonTypesEnum.stop, ButtonTypesEnum.delete],
+    actions: [
+      ButtonTypesEnum.stop,
+      ButtonTypesEnum.buildParameters,
+      ButtonTypesEnum.changeVersion,
+      ButtonTypesEnum.delete,
+    ],
     canCancel: false,
     canAcceptJobs: true,
   },
@@ -44,7 +68,12 @@ export const statusToAbilities: Record<WorkspaceStatus, WorkspaceAbilities> = {
     canAcceptJobs: false,
   },
   stopped: {
-    actions: [ButtonTypesEnum.start, ButtonTypesEnum.delete],
+    actions: [
+      ButtonTypesEnum.start,
+      ButtonTypesEnum.buildParameters,
+      ButtonTypesEnum.changeVersion,
+      ButtonTypesEnum.delete,
+    ],
     canCancel: false,
     canAcceptJobs: true,
   },
@@ -52,6 +81,8 @@ export const statusToAbilities: Record<WorkspaceStatus, WorkspaceAbilities> = {
     actions: [
       ButtonTypesEnum.start,
       ButtonTypesEnum.stop,
+      ButtonTypesEnum.buildParameters,
+      ButtonTypesEnum.changeVersion,
       ButtonTypesEnum.delete,
     ],
     canCancel: false,
@@ -59,7 +90,12 @@ export const statusToAbilities: Record<WorkspaceStatus, WorkspaceAbilities> = {
   },
   // in the case of an error
   failed: {
-    actions: [ButtonTypesEnum.start, ButtonTypesEnum.delete],
+    actions: [
+      ButtonTypesEnum.start,
+      ButtonTypesEnum.buildParameters,
+      ButtonTypesEnum.changeVersion,
+      ButtonTypesEnum.delete,
+    ],
     canCancel: false,
     canAcceptJobs: true,
   },

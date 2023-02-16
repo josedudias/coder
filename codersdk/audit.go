@@ -14,7 +14,6 @@ import (
 type ResourceType string
 
 const (
-	ResourceTypeOrganization    ResourceType = "organization"
 	ResourceTypeTemplate        ResourceType = "template"
 	ResourceTypeTemplateVersion ResourceType = "template_version"
 	ResourceTypeUser            ResourceType = "user"
@@ -23,12 +22,11 @@ const (
 	ResourceTypeGitSSHKey       ResourceType = "git_ssh_key"
 	ResourceTypeAPIKey          ResourceType = "api_key"
 	ResourceTypeGroup           ResourceType = "group"
+	ResourceTypeLicense         ResourceType = "license"
 )
 
 func (r ResourceType) FriendlyString() string {
 	switch r {
-	case ResourceTypeOrganization:
-		return "organization"
 	case ResourceTypeTemplate:
 		return "template"
 	case ResourceTypeTemplateVersion:
@@ -38,13 +36,17 @@ func (r ResourceType) FriendlyString() string {
 	case ResourceTypeWorkspace:
 		return "workspace"
 	case ResourceTypeWorkspaceBuild:
-		return "workspace build"
+		// workspace builds have a unique friendly string
+		// see coderd/audit.go:298 for explanation
+		return "workspace"
 	case ResourceTypeGitSSHKey:
 		return "git ssh key"
 	case ResourceTypeAPIKey:
 		return "api key"
 	case ResourceTypeGroup:
 		return "group"
+	case ResourceTypeLicense:
+		return "license"
 	default:
 		return "unknown"
 	}
@@ -58,9 +60,11 @@ const (
 	AuditActionDelete AuditAction = "delete"
 	AuditActionStart  AuditAction = "start"
 	AuditActionStop   AuditAction = "stop"
+	AuditActionLogin  AuditAction = "login"
+	AuditActionLogout AuditAction = "logout"
 )
 
-func (a AuditAction) FriendlyString() string {
+func (a AuditAction) Friendly() string {
 	switch a {
 	case AuditActionCreate:
 		return "created"
@@ -72,6 +76,10 @@ func (a AuditAction) FriendlyString() string {
 		return "started"
 	case AuditActionStop:
 		return "stopped"
+	case AuditActionLogin:
+		return "logged in"
+	case AuditActionLogout:
+		return "logged out"
 	default:
 		return "unknown"
 	}
@@ -86,14 +94,14 @@ type AuditDiffField struct {
 }
 
 type AuditLog struct {
-	ID             uuid.UUID    `json:"id"`
-	RequestID      uuid.UUID    `json:"request_id"`
-	Time           time.Time    `json:"time"`
-	OrganizationID uuid.UUID    `json:"organization_id"`
+	ID             uuid.UUID    `json:"id" format:"uuid"`
+	RequestID      uuid.UUID    `json:"request_id" format:"uuid"`
+	Time           time.Time    `json:"time" format:"date-time"`
+	OrganizationID uuid.UUID    `json:"organization_id" format:"uuid"`
 	IP             netip.Addr   `json:"ip"`
 	UserAgent      string       `json:"user_agent"`
 	ResourceType   ResourceType `json:"resource_type"`
-	ResourceID     uuid.UUID    `json:"resource_id"`
+	ResourceID     uuid.UUID    `json:"resource_id" format:"uuid"`
 	// ResourceTarget is the name of the resource.
 	ResourceTarget   string          `json:"resource_target"`
 	ResourceIcon     string          `json:"resource_icon"`
@@ -102,6 +110,8 @@ type AuditLog struct {
 	StatusCode       int32           `json:"status_code"`
 	AdditionalFields json.RawMessage `json:"additional_fields"`
 	Description      string          `json:"description"`
+	ResourceLink     string          `json:"resource_link"`
+	IsDeleted        bool            `json:"is_deleted"`
 
 	User *User `json:"user"`
 }
@@ -113,21 +123,16 @@ type AuditLogsRequest struct {
 
 type AuditLogResponse struct {
 	AuditLogs []AuditLog `json:"audit_logs"`
-}
-
-type AuditLogCountRequest struct {
-	SearchQuery string `json:"q,omitempty"`
-}
-
-type AuditLogCountResponse struct {
-	Count int64 `json:"count"`
+	Count     int64      `json:"count"`
 }
 
 type CreateTestAuditLogRequest struct {
-	Action       AuditAction  `json:"action,omitempty"`
-	ResourceType ResourceType `json:"resource_type,omitempty"`
-	ResourceID   uuid.UUID    `json:"resource_id,omitempty"`
-	Time         time.Time    `json:"time,omitempty"`
+	Action           AuditAction     `json:"action,omitempty" enums:"create,write,delete,start,stop"`
+	ResourceType     ResourceType    `json:"resource_type,omitempty" enums:"template,template_version,user,workspace,workspace_build,git_ssh_key,auditable_group"`
+	ResourceID       uuid.UUID       `json:"resource_id,omitempty" format:"uuid"`
+	AdditionalFields json.RawMessage `json:"additional_fields,omitempty"`
+	Time             time.Time       `json:"time,omitempty" format:"date-time"`
+	BuildReason      BuildReason     `json:"build_reason,omitempty" enums:"autostart,autostop,initiator"`
 }
 
 // AuditLogs retrieves audit logs from the given page.
@@ -147,7 +152,7 @@ func (c *Client) AuditLogs(ctx context.Context, req AuditLogsRequest) (AuditLogR
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return AuditLogResponse{}, readBodyAsError(res)
+		return AuditLogResponse{}, ReadBodyAsError(res)
 	}
 
 	var logRes AuditLogResponse
@@ -159,35 +164,8 @@ func (c *Client) AuditLogs(ctx context.Context, req AuditLogsRequest) (AuditLogR
 	return logRes, nil
 }
 
-// AuditLogCount returns the count of all audit logs in the product.
-func (c *Client) AuditLogCount(ctx context.Context, req AuditLogCountRequest) (AuditLogCountResponse, error) {
-	res, err := c.Request(ctx, http.MethodGet, "/api/v2/audit/count", nil, func(r *http.Request) {
-		q := r.URL.Query()
-		var params []string
-		if req.SearchQuery != "" {
-			params = append(params, req.SearchQuery)
-		}
-		q.Set("q", strings.Join(params, " "))
-		r.URL.RawQuery = q.Encode()
-	})
-	if err != nil {
-		return AuditLogCountResponse{}, err
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode != http.StatusOK {
-		return AuditLogCountResponse{}, readBodyAsError(res)
-	}
-
-	var logRes AuditLogCountResponse
-	err = json.NewDecoder(res.Body).Decode(&logRes)
-	if err != nil {
-		return AuditLogCountResponse{}, err
-	}
-
-	return logRes, nil
-}
-
+// CreateTestAuditLog creates a fake audit log. Only owners of the organization
+// can perform this action. It's used for testing purposes.
 func (c *Client) CreateTestAuditLog(ctx context.Context, req CreateTestAuditLogRequest) error {
 	res, err := c.Request(ctx, http.MethodPost, "/api/v2/audit/testgenerate", req)
 	if err != nil {

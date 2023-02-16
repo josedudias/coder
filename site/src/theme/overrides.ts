@@ -30,6 +30,10 @@ export const getOverrides = ({
         width: 36,
         height: 36,
         fontSize: 18,
+
+        "& .MuiSvgIcon-root": {
+          width: "50%",
+        },
       },
       colorDefault: {
         backgroundColor: colors.gray[6],
@@ -38,7 +42,8 @@ export const getOverrides = ({
     MuiButton: {
       root: {
         // Prevents a loading button from collapsing!
-        minHeight: 42,
+        minHeight: 40,
+        height: 40, // Same size of input height
         fontWeight: "normal",
         fontSize: 16,
         textTransform: "none",
@@ -69,6 +74,7 @@ export const getOverrides = ({
         padding: `0 16px`,
         fontSize: 14,
         minHeight: 36,
+        height: 36,
         borderRadius: borderRadiusSm,
       },
       iconSizeSmall: {

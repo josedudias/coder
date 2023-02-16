@@ -14,6 +14,7 @@ import (
 	"github.com/coder/coder/coderd/database/dbtestutil"
 	"github.com/coder/coder/codersdk"
 	"github.com/coder/coder/enterprise/coderd/coderdenttest"
+	"github.com/coder/coder/enterprise/coderd/license"
 	"github.com/coder/coder/testutil"
 )
 
@@ -58,7 +59,9 @@ func TestReplicas(t *testing.T) {
 		})
 		firstUser := coderdtest.CreateFirstUser(t, firstClient)
 		coderdenttest.AddLicense(t, firstClient, coderdenttest.LicenseOptions{
-			HighAvailability: true,
+			Features: license.Features{
+				codersdk.FeatureHighAvailability: 1,
+			},
 		})
 
 		secondClient := coderdenttest.New(t, &coderdenttest.Options{
@@ -81,7 +84,7 @@ func TestReplicas(t *testing.T) {
 		require.Eventually(t, func() bool {
 			ctx, cancelFunc := context.WithTimeout(context.Background(), testutil.WaitShort)
 			defer cancelFunc()
-			_, err = conn.Ping(ctx)
+			_, _, _, err = conn.Ping(ctx)
 			return err == nil
 		}, testutil.WaitLong, testutil.IntervalFast)
 		_ = conn.Close()
@@ -100,7 +103,9 @@ func TestReplicas(t *testing.T) {
 		})
 		firstUser := coderdtest.CreateFirstUser(t, firstClient)
 		coderdenttest.AddLicense(t, firstClient, coderdenttest.LicenseOptions{
-			HighAvailability: true,
+			Features: license.Features{
+				codersdk.FeatureHighAvailability: 1,
+			},
 		})
 
 		secondClient := coderdenttest.New(t, &coderdenttest.Options{
@@ -124,7 +129,7 @@ func TestReplicas(t *testing.T) {
 		require.Eventually(t, func() bool {
 			ctx, cancelFunc := context.WithTimeout(context.Background(), testutil.IntervalSlow)
 			defer cancelFunc()
-			_, err = conn.Ping(ctx)
+			_, _, _, err = conn.Ping(ctx)
 			return err == nil
 		}, testutil.WaitLong, testutil.IntervalFast)
 		_ = conn.Close()

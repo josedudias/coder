@@ -239,6 +239,9 @@ func TestMigrateUpWithFixtures(t *testing.T) {
 		"group_members",
 		"licenses",
 		"replicas",
+		"template_version_parameters",
+		"workspace_build_parameters",
+		"template_version_variables",
 	}
 	s := &tableStats{s: make(map[string]int)}
 
@@ -329,6 +332,10 @@ func TestMigrateUpWithFixtures(t *testing.T) {
 					s.Add(table, count)
 				}
 			}
+
+			// Test that migration down is successful after up.
+			err = migrations.Down(db)
+			require.NoError(t, err, "final migration down should be successful")
 		})
 	}
 }

@@ -13,6 +13,7 @@ import { Maybe } from "components/Conditionals/Maybe"
 import { AgentStatus } from "./AgentStatus"
 import { AppLinkSkeleton } from "components/AppLink/AppLinkSkeleton"
 import { useTranslation } from "react-i18next"
+import { VSCodeDesktopButton } from "components/VSCodeDesktopButton/VSCodeDesktopButton"
 
 export interface AgentRowProps {
   agent: WorkspaceAgent
@@ -20,7 +21,9 @@ export interface AgentRowProps {
   applicationsHost: string | undefined
   showApps: boolean
   hideSSHButton?: boolean
+  hideVSCodeDesktopButton?: boolean
   serverVersion: string
+  onUpdateAgent: () => void
 }
 
 export const AgentRow: FC<AgentRowProps> = ({
@@ -29,7 +32,9 @@ export const AgentRow: FC<AgentRowProps> = ({
   applicationsHost,
   showApps,
   hideSSHButton,
+  hideVSCodeDesktopButton,
   serverVersion,
+  onUpdateAgent,
 }) => {
   const styles = useStyles()
   const { t } = useTranslation("agent")
@@ -45,7 +50,7 @@ export const AgentRow: FC<AgentRowProps> = ({
     >
       <Stack direction="row" alignItems="baseline">
         <div className={styles.agentStatusWrapper}>
-          <AgentStatus agent={agent} workspace={workspace} />
+          <AgentStatus agent={agent} />
         </div>
         <div>
           <div className={styles.agentName}>{agent.name}</div>
@@ -58,7 +63,11 @@ export const AgentRow: FC<AgentRowProps> = ({
             <span className={styles.agentOS}>{agent.operating_system}</span>
 
             <Maybe condition={agent.status === "connected"}>
-              <AgentVersion agent={agent} serverVersion={serverVersion} />
+              <AgentVersion
+                agent={agent}
+                serverVersion={serverVersion}
+                onUpdate={onUpdateAgent}
+              />
             </Maybe>
 
             <AgentLatency agent={agent} />
@@ -105,7 +114,15 @@ export const AgentRow: FC<AgentRowProps> = ({
                 agentName={agent.name}
               />
             )}
-            {applicationsHost !== undefined && (
+            {!hideVSCodeDesktopButton && (
+              <VSCodeDesktopButton
+                userName={workspace.owner_name}
+                workspaceName={workspace.name}
+                agentName={agent.name}
+                folderPath={agent.expanded_directory}
+              />
+            )}
+            {applicationsHost !== undefined && applicationsHost !== "" && (
               <PortForwardButton
                 host={applicationsHost}
                 workspaceName={workspace.name}

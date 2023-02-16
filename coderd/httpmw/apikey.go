@@ -19,7 +19,9 @@ import (
 	"golang.org/x/xerrors"
 
 	"github.com/coder/coder/coderd/database"
+	"github.com/coder/coder/coderd/database/dbauthz"
 	"github.com/coder/coder/coderd/httpapi"
+	"github.com/coder/coder/coderd/rbac"
 	"github.com/coder/coder/codersdk"
 )
 
@@ -51,11 +53,10 @@ func APIKey(r *http.Request) database.APIKey {
 type userAuthKey struct{}
 
 type Authorization struct {
-	ID       uuid.UUID
+	Actor rbac.Subject
+	// Username is required for logging and human friendly related
+	// identification.
 	Username string
-	Roles    []string
-	Groups   []string
-	Scope    database.APIKeyScope
 }
 
 // UserAuthorizationOptional may return the roles and scope used for
@@ -88,9 +89,10 @@ const (
 )
 
 type ExtractAPIKeyConfig struct {
-	DB              database.Store
-	OAuth2Configs   *OAuth2Configs
-	RedirectToLogin bool
+	DB                          database.Store
+	OAuth2Configs               *OAuth2Configs
+	RedirectToLogin             bool
+	DisableSessionExpiryRefresh bool
 
 	// Optional governs whether the API key is optional. Use this if you want to
 	// allow unauthenticated requests.
@@ -144,7 +146,7 @@ func ExtractAPIKey(cfg ExtractAPIKeyConfig) func(http.Handler) http.Handler {
 			if token == "" {
 				optionalWrite(http.StatusUnauthorized, codersdk.Response{
 					Message: SignedOutErrorMessage,
-					Detail:  fmt.Sprintf("Cookie %q or query parameter must be provided.", codersdk.SessionTokenKey),
+					Detail:  fmt.Sprintf("Cookie %q or query parameter must be provided.", codersdk.SessionTokenCookie),
 				})
 				return
 			}
@@ -158,7 +160,8 @@ func ExtractAPIKey(cfg ExtractAPIKeyConfig) func(http.Handler) http.Handler {
 				return
 			}
 
-			key, err := cfg.DB.GetAPIKeyByID(r.Context(), keyID)
+			//nolint:gocritic // System needs to fetch API key to check if it's valid.
+			key, err := cfg.DB.GetAPIKeyByID(dbauthz.AsSystemRestricted(ctx), keyID)
 			if err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
 					optionalWrite(http.StatusUnauthorized, codersdk.Response{
@@ -191,7 +194,8 @@ func ExtractAPIKey(cfg ExtractAPIKeyConfig) func(http.Handler) http.Handler {
 				changed = false
 			)
 			if key.LoginType == database.LoginTypeGithub || key.LoginType == database.LoginTypeOIDC {
-				link, err = cfg.DB.GetUserLinkByUserIDLoginType(r.Context(), database.GetUserLinkByUserIDLoginTypeParams{
+				//nolint:gocritic // System needs to fetch UserLink to check if it's valid.
+				link, err = cfg.DB.GetUserLinkByUserIDLoginType(dbauthz.AsSystemRestricted(ctx), database.GetUserLinkByUserIDLoginTypeParams{
 					UserID:    key.UserID,
 					LoginType: key.LoginType,
 				})
@@ -266,13 +270,16 @@ func ExtractAPIKey(cfg ExtractAPIKeyConfig) func(http.Handler) http.Handler {
 			}
 			// Only update the ExpiresAt once an hour to prevent database spam.
 			// We extend the ExpiresAt to reduce re-authentication.
-			apiKeyLifetime := time.Duration(key.LifetimeSeconds) * time.Second
-			if key.ExpiresAt.Sub(now) <= apiKeyLifetime-time.Hour {
-				key.ExpiresAt = now.Add(apiKeyLifetime)
-				changed = true
+			if !cfg.DisableSessionExpiryRefresh {
+				apiKeyLifetime := time.Duration(key.LifetimeSeconds) * time.Second
+				if key.ExpiresAt.Sub(now) <= apiKeyLifetime-time.Hour {
+					key.ExpiresAt = now.Add(apiKeyLifetime)
+					changed = true
+				}
 			}
 			if changed {
-				err := cfg.DB.UpdateAPIKeyByID(r.Context(), database.UpdateAPIKeyByIDParams{
+				//nolint:gocritic // System needs to update API Key LastUsed
+				err := cfg.DB.UpdateAPIKeyByID(dbauthz.AsSystemRestricted(ctx), database.UpdateAPIKeyByIDParams{
 					ID:        key.ID,
 					LastUsed:  key.LastUsed,
 					ExpiresAt: key.ExpiresAt,
@@ -288,7 +295,8 @@ func ExtractAPIKey(cfg ExtractAPIKeyConfig) func(http.Handler) http.Handler {
 				// If the API Key is associated with a user_link (e.g. Github/OIDC)
 				// then we want to update the relevant oauth fields.
 				if link.UserID != uuid.Nil {
-					link, err = cfg.DB.UpdateUserLink(r.Context(), database.UpdateUserLinkParams{
+					// nolint:gocritic
+					link, err = cfg.DB.UpdateUserLink(dbauthz.AsSystemRestricted(ctx), database.UpdateUserLinkParams{
 						UserID:            link.UserID,
 						LoginType:         link.LoginType,
 						OAuthAccessToken:  link.OAuthAccessToken,
@@ -307,7 +315,8 @@ func ExtractAPIKey(cfg ExtractAPIKeyConfig) func(http.Handler) http.Handler {
 				// We only want to update this occasionally to reduce DB write
 				// load. We update alongside the UserLink and APIKey since it's
 				// easier on the DB to colocate writes.
-				_, err = cfg.DB.UpdateUserLastSeenAt(ctx, database.UpdateUserLastSeenAtParams{
+				// nolint:gocritic
+				_, err = cfg.DB.UpdateUserLastSeenAt(dbauthz.AsSystemRestricted(ctx), database.UpdateUserLastSeenAtParams{
 					ID:         key.UserID,
 					LastSeenAt: database.Now(),
 					UpdatedAt:  database.Now(),
@@ -324,7 +333,8 @@ func ExtractAPIKey(cfg ExtractAPIKeyConfig) func(http.Handler) http.Handler {
 			// If the key is valid, we also fetch the user roles and status.
 			// The roles are used for RBAC authorize checks, and the status
 			// is to block 'suspended' users from accessing the platform.
-			roles, err := cfg.DB.GetAuthorizationUserRoles(r.Context(), key.UserID)
+			// nolint:gocritic
+			roles, err := cfg.DB.GetAuthorizationUserRoles(dbauthz.AsSystemRestricted(ctx), key.UserID)
 			if err != nil {
 				write(http.StatusUnauthorized, codersdk.Response{
 					Message: internalErrorMessage,
@@ -340,14 +350,20 @@ func ExtractAPIKey(cfg ExtractAPIKeyConfig) func(http.Handler) http.Handler {
 				return
 			}
 
+			// Actor is the user's authorization context.
+			actor := rbac.Subject{
+				ID:     key.UserID.String(),
+				Roles:  rbac.RoleNames(roles.Roles),
+				Groups: roles.Groups,
+				Scope:  rbac.ScopeName(key.Scope),
+			}
 			ctx = context.WithValue(ctx, apiKeyContextKey{}, key)
 			ctx = context.WithValue(ctx, userAuthKey{}, Authorization{
-				ID:       key.UserID,
 				Username: roles.Username,
-				Roles:    roles.Roles,
-				Scope:    key.Scope,
-				Groups:   roles.Groups,
+				Actor:    actor,
 			})
+			// Set the auth context for the authzquerier as well.
+			ctx = dbauthz.As(ctx, actor)
 
 			next.ServeHTTP(rw, r.WithContext(ctx))
 		})
@@ -362,17 +378,17 @@ func ExtractAPIKey(cfg ExtractAPIKeyConfig) func(http.Handler) http.Handler {
 // 4. The coder_session_token query parameter
 // 5. The custom auth header
 func apiTokenFromRequest(r *http.Request) string {
-	cookie, err := r.Cookie(codersdk.SessionTokenKey)
+	cookie, err := r.Cookie(codersdk.SessionTokenCookie)
 	if err == nil && cookie.Value != "" {
 		return cookie.Value
 	}
 
-	urlValue := r.URL.Query().Get(codersdk.SessionTokenKey)
+	urlValue := r.URL.Query().Get(codersdk.SessionTokenCookie)
 	if urlValue != "" {
 		return urlValue
 	}
 
-	headerValue := r.Header.Get(codersdk.SessionCustomHeader)
+	headerValue := r.Header.Get(codersdk.SessionTokenHeader)
 	if headerValue != "" {
 		return headerValue
 	}

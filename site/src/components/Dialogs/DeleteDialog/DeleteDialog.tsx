@@ -1,10 +1,7 @@
-import FormHelperText from "@material-ui/core/FormHelperText"
 import makeStyles from "@material-ui/core/styles/makeStyles"
 import TextField from "@material-ui/core/TextField"
-import Typography from "@material-ui/core/Typography"
 import { Maybe } from "components/Conditionals/Maybe"
-import { Stack } from "components/Stack/Stack"
-import React, { ChangeEvent, useState } from "react"
+import { ChangeEvent, useState, PropsWithChildren, FC } from "react"
 import { useTranslation } from "react-i18next"
 import { ConfirmDialog } from "../ConfirmDialog/ConfirmDialog"
 
@@ -18,9 +15,15 @@ export interface DeleteDialogProps {
   confirmLoading?: boolean
 }
 
-export const DeleteDialog: React.FC<
-  React.PropsWithChildren<DeleteDialogProps>
-> = ({ isOpen, onCancel, onConfirm, entity, info, name, confirmLoading }) => {
+export const DeleteDialog: FC<PropsWithChildren<DeleteDialogProps>> = ({
+  isOpen,
+  onCancel,
+  onConfirm,
+  entity,
+  info,
+  name,
+  confirmLoading,
+}) => {
   const styles = useStyles()
   const { t } = useTranslation("common")
   const [nameValue, setNameValue] = useState("")
@@ -28,29 +31,33 @@ export const DeleteDialog: React.FC<
   const handleChange = (event: ChangeEvent<HTMLInputElement>) => {
     setNameValue(event.target.value)
   }
+  const hasError = nameValue.length > 0 && !confirmed
 
   const content = (
     <>
-      <Typography>{t("deleteDialog.intro", { entity })}</Typography>
+      <p>{t("deleteDialog.intro", { entity })}</p>
       <Maybe condition={info !== undefined}>
-        <Typography className={styles.warning}>{info}</Typography>
+        <p className={styles.warning}>{info}</p>
       </Maybe>
-      <Typography>{t("deleteDialog.confirm", { entity })}</Typography>
-      <Stack spacing={1}>
-        <TextField
-          name="confirmation"
-          id="confirmation"
-          placeholder={name}
-          value={nameValue}
-          onChange={handleChange}
-          label={t("deleteDialog.confirmLabel", { entity })}
-        />
-        <Maybe condition={nameValue.length > 0 && !confirmed}>
-          <FormHelperText error>
-            {t("deleteDialog.incorrectName", { entity })}
-          </FormHelperText>
-        </Maybe>
-      </Stack>
+      <p>{t("deleteDialog.confirm", { entity })}</p>
+
+      <TextField
+        fullWidth
+        InputLabelProps={{
+          shrink: true,
+        }}
+        autoFocus
+        className={styles.textField}
+        name="confirmation"
+        autoComplete="off"
+        id="confirmation"
+        placeholder={name}
+        value={nameValue}
+        onChange={handleChange}
+        label={t("deleteDialog.confirmLabel", { entity })}
+        error={hasError}
+        helperText={hasError && t("deleteDialog.incorrectName", { entity })}
+      />
     </>
   )
 
@@ -72,5 +79,9 @@ export const DeleteDialog: React.FC<
 const useStyles = makeStyles((theme) => ({
   warning: {
     color: theme.palette.warning.light,
+  },
+
+  textField: {
+    marginTop: theme.spacing(3),
   },
 }))

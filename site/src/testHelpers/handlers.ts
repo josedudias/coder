@@ -3,11 +3,15 @@ import { WorkspaceBuildTransition } from "../api/types"
 import { CreateWorkspaceBuildRequest } from "../api/typesGenerated"
 import { permissionsToCheck } from "../xServices/auth/authXService"
 import * as M from "./entities"
-import { MockGroup } from "./entities"
+import { MockGroup, MockWorkspaceQuota } from "./entities"
 
 export const handlers = [
   rest.get("/api/v2/templates/:templateId/daus", async (req, res, ctx) => {
     return res(ctx.status(200), ctx.json(M.MockTemplateDAUResponse))
+  }),
+
+  rest.get("/api/v2/insights/daus", async (req, res, ctx) => {
+    return res(ctx.status(200), ctx.json(M.MockDeploymentDAUResponse))
   }),
 
   // build info
@@ -15,10 +19,29 @@ export const handlers = [
     return res(ctx.status(200), ctx.json(M.MockBuildInfo))
   }),
 
+  // experiments
+  rest.get("/api/v2/experiments", async (req, res, ctx) => {
+    return res(ctx.status(200), ctx.json(M.MockExperiments))
+  }),
+
+  // update check
+  rest.get("/api/v2/updatecheck", async (req, res, ctx) => {
+    return res(ctx.status(200), ctx.json(M.MockUpdateCheck))
+  }),
+
   // organizations
   rest.get("/api/v2/organizations/:organizationId", async (req, res, ctx) => {
     return res(ctx.status(200), ctx.json(M.MockOrganization))
   }),
+  rest.get(
+    "api/v2/organizations/:organizationId/templates/examples",
+    (req, res, ctx) => {
+      return res(
+        ctx.status(200),
+        ctx.json([M.MockTemplateExample, M.MockTemplateExample2]),
+      )
+    },
+  ),
   rest.get(
     "/api/v2/organizations/:organizationId/templates/:templateId",
     async (req, res, ctx) => {
@@ -37,7 +60,10 @@ export const handlers = [
     return res(ctx.status(200), ctx.json(M.MockTemplate))
   }),
   rest.get("/api/v2/templates/:templateId/versions", async (req, res, ctx) => {
-    return res(ctx.status(200), ctx.json([M.MockTemplateVersion]))
+    return res(
+      ctx.status(200),
+      ctx.json([M.MockTemplateVersion2, M.MockTemplateVersion]),
+    )
   }),
   rest.patch("/api/v2/templates/:templateId", async (req, res, ctx) => {
     return res(ctx.status(200), ctx.json(M.MockTemplate))
@@ -63,6 +89,18 @@ export const handlers = [
       )
     },
   ),
+  rest.get(
+    "api/v2/organizations/:organizationId/templates/:templateName/versions/:templateVersionName",
+    async (req, res, ctx) => {
+      return res(ctx.status(200), ctx.json(M.MockTemplateVersion))
+    },
+  ),
+  rest.get(
+    "api/v2/organizations/:organizationId/templates/:templateName/versions/:templateVersionName/previous",
+    async (req, res, ctx) => {
+      return res(ctx.status(200), ctx.json(M.MockTemplateVersion2))
+    },
+  ),
   rest.delete("/api/v2/templates/:templateId", async (req, res, ctx) => {
     return res(ctx.status(200), ctx.json(M.MockTemplate))
   }),
@@ -71,11 +109,14 @@ export const handlers = [
   rest.get("/api/v2/users", async (req, res, ctx) => {
     return res(
       ctx.status(200),
-      ctx.json([M.MockUser, M.MockUser2, M.SuspendedMockUser]),
+      ctx.json({
+        users: [M.MockUser, M.MockUser2, M.SuspendedMockUser],
+        count: 26,
+      }),
     )
   }),
-  rest.get("/api/v2/users/count", async (req, res, ctx) => {
-    return res(ctx.status(200), ctx.json(M.MockUserCountResponse))
+  rest.post("/api/v2/users", async (req, res, ctx) => {
+    return res(ctx.status(200), ctx.json(M.MockUser))
   }),
   rest.get("/api/v2/users/me/organizations", (req, res, ctx) => {
     return res(ctx.status(200), ctx.json([M.MockOrganization]))
@@ -108,6 +149,7 @@ export const handlers = [
     const permissions = [
       ...Object.keys(permissionsToCheck),
       "canUpdateTemplate",
+      "updateWorkspace",
     ]
     const response = permissions.reduce((obj, permission) => {
       return {
@@ -203,16 +245,18 @@ export const handlers = [
 
   // Audit
   rest.get("/api/v2/audit", (req, res, ctx) => {
+    const filter = req.url.searchParams.get("q") as string
+    const logs =
+      filter === "resource_type:workspace action:create"
+        ? [M.MockAuditLog]
+        : [M.MockAuditLog, M.MockAuditLog2]
     return res(
       ctx.status(200),
       ctx.json({
-        audit_logs: [M.MockAuditLog, M.MockAuditLog2],
+        audit_logs: logs,
+        count: logs.length,
       }),
     )
-  }),
-
-  rest.get("/api/v2/audit/count", (req, res, ctx) => {
-    return res(ctx.status(200), ctx.json({ count: 1000 }))
   }),
 
   // Applications host
@@ -242,5 +286,13 @@ export const handlers = [
 
   rest.delete("/api/v2/groups/:groupId", (req, res, ctx) => {
     return res(ctx.status(204))
+  }),
+
+  rest.get("/api/v2/workspace-quota/:userId", (req, res, ctx) => {
+    return res(ctx.status(200), ctx.json(MockWorkspaceQuota))
+  }),
+
+  rest.get("/api/v2/appearance", (req, res, ctx) => {
+    return res(ctx.status(200), ctx.json(M.MockAppearance))
   }),
 ]

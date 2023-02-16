@@ -22,6 +22,16 @@ type Config struct {
 	Regex *regexp.Regexp
 	// Type is the type of provider.
 	Type codersdk.GitProvider
+	// NoRefresh stops Coder from using the refresh token
+	// to renew the access token.
+	//
+	// Some organizations have security policies that require
+	// re-authentication for every token.
+	NoRefresh bool
+	// ValidateURL ensures an access token is valid before
+	// returning it to the user. If omitted, tokens will
+	// not be validated before being returned.
+	ValidateURL string
 }
 
 // ConvertConfig converts the YAML configuration entry to the
@@ -95,6 +105,9 @@ func ConvertConfig(entries []codersdk.GitAuthConfig, accessURL *url.URL) ([]*Con
 		if entry.Scopes != nil && len(entry.Scopes) > 0 {
 			oauth2Config.Scopes = entry.Scopes
 		}
+		if entry.ValidateURL == "" {
+			entry.ValidateURL = validateURL[typ]
+		}
 
 		var oauthConfig httpmw.OAuth2Config = oauth2Config
 		// Azure DevOps uses JWT token authentication!
@@ -107,6 +120,8 @@ func ConvertConfig(entries []codersdk.GitAuthConfig, accessURL *url.URL) ([]*Con
 			ID:           entry.ID,
 			Regex:        regex,
 			Type:         typ,
+			NoRefresh:    entry.NoRefresh,
+			ValidateURL:  entry.ValidateURL,
 		})
 	}
 	return configs, nil

@@ -29,6 +29,7 @@ import (
 	"github.com/coder/coder/coderd/database/dbauthz"
 	"github.com/coder/coder/coderd/parameter"
 	"github.com/coder/coder/coderd/telemetry"
+	"github.com/coder/coder/coderd/util/slice"
 	"github.com/coder/coder/codersdk"
 	"github.com/coder/coder/provisioner"
 	"github.com/coder/coder/provisionerd/proto"
@@ -42,16 +43,17 @@ var (
 )
 
 type Server struct {
-	AccessURL      *url.URL
-	ID             uuid.UUID
-	Logger         slog.Logger
-	Provisioners   []database.ProvisionerType
-	Tags           json.RawMessage
-	Database       database.Store
-	Pubsub         database.Pubsub
-	Telemetry      telemetry.Reporter
-	QuotaCommitter *atomic.Pointer[proto.QuotaCommitter]
-	Auditor        *atomic.Pointer[audit.Auditor]
+	AccessURL        *url.URL
+	ID               uuid.UUID
+	Logger           slog.Logger
+	Provisioners     []database.ProvisionerType
+	GitAuthProviders []string
+	Tags             json.RawMessage
+	Database         database.Store
+	Pubsub           database.Pubsub
+	Telemetry        telemetry.Reporter
+	QuotaCommitter   *atomic.Pointer[proto.QuotaCommitter]
+	Auditor          *atomic.Pointer[audit.Auditor]
 
 	AcquireJobDebounce time.Duration
 }
@@ -210,6 +212,8 @@ func (server *Server) AcquireJob(ctx context.Context, _ *proto.Empty) (*proto.Ac
 					WorkspaceOwnerEmail: owner.Email,
 					WorkspaceId:         workspace.ID.String(),
 					WorkspaceOwnerId:    owner.ID.String(),
+					TemplateName:        template.Name,
+					TemplateVersion:     templateVersion.Name,
 				},
 			},
 		}
@@ -264,9 +268,14 @@ func (server *Server) AcquireJob(ctx context.Context, _ *proto.Empty) (*proto.Ac
 			return nil, failJob(fmt.Sprintf("unmarshal job input %q: %s", job.Input, err))
 		}
 
+		userVariableValues, err := server.includeLastVariableValues(ctx, input.TemplateVersionID, input.UserVariableValues)
+		if err != nil {
+			return nil, failJob(err.Error())
+		}
+
 		protoJob.Type = &proto.AcquiredJob_TemplateImport_{
 			TemplateImport: &proto.AcquiredJob_TemplateImport{
-				UserVariableValues: convertVariableValues(input.UserVariableValues),
+				UserVariableValues: convertVariableValues(userVariableValues),
 				Metadata: &sdkproto.Provision_Metadata{
 					CoderUrl: server.AccessURL.String(),
 				},
@@ -288,6 +297,58 @@ func (server *Server) AcquireJob(ctx context.Context, _ *proto.Empty) (*proto.Ac
 	}
 
 	return protoJob, err
+}
+
+func (server *Server) includeLastVariableValues(ctx context.Context, templateVersionID uuid.UUID, userVariableValues []codersdk.VariableValue) ([]codersdk.VariableValue, error) {
+	var values []codersdk.VariableValue
+	values = append(values, userVariableValues...)
+
+	if templateVersionID == uuid.Nil {
+		return values, nil
+	}
+
+	templateVersion, err := server.Database.GetTemplateVersionByID(ctx, templateVersionID)
+	if err != nil {
+		return nil, xerrors.Errorf("get template version: %w", err)
+	}
+
+	if templateVersion.TemplateID.UUID == uuid.Nil {
+		return values, nil
+	}
+
+	template, err := server.Database.GetTemplateByID(ctx, templateVersion.TemplateID.UUID)
+	if err != nil {
+		return nil, xerrors.Errorf("get template: %w", err)
+	}
+
+	if template.ActiveVersionID == uuid.Nil {
+		return values, nil
+	}
+
+	templateVariables, err := server.Database.GetTemplateVersionVariables(ctx, template.ActiveVersionID)
+	if err != nil && !xerrors.Is(err, sql.ErrNoRows) {
+		return nil, xerrors.Errorf("get template version variables: %w", err)
+	}
+
+	for _, templateVariable := range templateVariables {
+		var alreadyAdded bool
+		for _, uvv := range userVariableValues {
+			if uvv.Name == templateVariable.Name {
+				alreadyAdded = true
+				break
+			}
+		}
+
+		if alreadyAdded {
+			continue
+		}
+
+		values = append(values, codersdk.VariableValue{
+			Name:  templateVariable.Name,
+			Value: templateVariable.Value,
+		})
+	}
+	return values, nil
 }
 
 func (server *Server) CommitQuota(ctx context.Context, request *proto.CommitQuotaRequest) (*proto.CommitQuotaResponse, error) {
@@ -417,7 +478,7 @@ func (server *Server) UpdateJob(ctx context.Context, request *proto.UpdateJobReq
 		for _, templateVariable := range request.TemplateVariables {
 			server.Logger.Debug(ctx, "insert template variable", slog.F("template_version_id", templateVersion.ID), slog.F("template_variable", redactTemplateVariable(templateVariable)))
 
-			var value = templateVariable.DefaultValue
+			value := templateVariable.DefaultValue
 			for _, v := range request.UserVariableValues {
 				if v.Name == templateVariable.Name {
 					value = v.Value
@@ -753,6 +814,27 @@ func (server *Server) CompleteJob(ctx context.Context, completed *proto.Complete
 			}
 		}
 
+		var completedError sql.NullString
+
+		for _, gitAuthProvider := range jobType.TemplateImport.GitAuthProviders {
+			if !slice.Contains(server.GitAuthProviders, gitAuthProvider) {
+				completedError = sql.NullString{
+					String: fmt.Sprintf("git auth provider %q is not configured", gitAuthProvider),
+					Valid:  true,
+				}
+				break
+			}
+		}
+
+		err = server.Database.UpdateTemplateVersionGitAuthProvidersByJobID(ctx, database.UpdateTemplateVersionGitAuthProvidersByJobIDParams{
+			JobID:            jobID,
+			GitAuthProviders: jobType.TemplateImport.GitAuthProviders,
+			UpdatedAt:        database.Now(),
+		})
+		if err != nil {
+			return nil, xerrors.Errorf("update template version git auth providers: %w", err)
+		}
+
 		err = server.Database.UpdateProvisionerJobWithCompleteByID(ctx, database.UpdateProvisionerJobWithCompleteByIDParams{
 			ID:        jobID,
 			UpdatedAt: database.Now(),
@@ -760,6 +842,7 @@ func (server *Server) CompleteJob(ctx context.Context, completed *proto.Complete
 				Time:  database.Now(),
 				Valid: true,
 			},
+			Error: completedError,
 		})
 		if err != nil {
 			return nil, xerrors.Errorf("update provisioner job: %w", err)
@@ -1222,8 +1305,9 @@ func convertVariableValues(variableValues []codersdk.VariableValue) []*sdkproto.
 	protoVariableValues := make([]*sdkproto.VariableValue, len(variableValues))
 	for i, variableValue := range variableValues {
 		protoVariableValues[i] = &sdkproto.VariableValue{
-			Name:  variableValue.Name,
-			Value: variableValue.Value,
+			Name:      variableValue.Name,
+			Value:     variableValue.Value,
+			Sensitive: true, // Without the template variable schema we have to assume that every variable may be sensitive.
 		}
 	}
 	return protoVariableValues
@@ -1321,7 +1405,7 @@ func ProvisionerJobLogsNotifyChannel(jobID uuid.UUID) string {
 func asVariableValues(templateVariables []database.TemplateVersionVariable) []*sdkproto.VariableValue {
 	var apiVariableValues []*sdkproto.VariableValue
 	for _, v := range templateVariables {
-		var value = v.Value
+		value := v.Value
 		if value == "" && v.DefaultValue != "" {
 			value = v.DefaultValue
 		}

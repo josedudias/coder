@@ -298,6 +298,13 @@
           "description": "Learn what usage telemetry Coder collects",
           "path": "./admin/telemetry.md",
           "icon_path": "./images/icons/science.svg"
+        },
+        {
+          "title": "Support Links",
+          "description": "Learn how to configure Support Links",
+          "path": "./admin/support-links.md",
+          "icon_path": "./images/icons/link.svg",
+          "state": "enterprise"
         }
       ]
     },
@@ -423,13 +430,9 @@
     {
       "title": "Command Line",
       "description": "Learn how to use Coder CLI",
-      "path": "./cli/coder.md",
+      "path": "./cli.md",
       "icon_path": "./images/icons/terminal.svg",
       "children": [
-        {
-          "title": "coder",
-          "path": "./cli/coder.md"
-        },
         {
           "title": "config-ssh",
           "path": "./cli/coder_config-ssh.md"
